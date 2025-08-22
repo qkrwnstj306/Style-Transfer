@@ -70,3 +70,13 @@ out = rearrange(out, '(b h) n d -> b n (h d)', h=h)
 ### make_mask_npy.py: 마스크 이미지를 입력으로 받아 npy로 만들어주는 코드
 
 ### hf_run.py, high_frequency_final.py: 예령님 설명 참조
+
+#Citation
+@InProceedings{Chung_2024_CVPR,
+    author    = {Chung, Jiwoo and Hyun, Sangeek and Heo, Jae-Pil},
+    title     = {Style Injection in Diffusion: A Training-free Approach for Adapting Large-scale Diffusion Models for Style Transfer},
+    booktitle = {Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR)},
+    month     = {June},
+    year      = {2024},
+    pages     = {8795-8805}
+}
