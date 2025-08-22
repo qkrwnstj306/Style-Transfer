@@ -21,7 +21,7 @@
 
 ### attn_map_viz.py: attention map 시각화하는 코드
 
-![image.png](%EC%84%A4%EB%AA%85%EC%84%9C%20257e62cde5dd80529082c0ee9b7e065d/image.png)
+![image.png](./image.png)
 
 ### generate_pkl_only.py: 말 그대로 pkl을 만들기 위해서 inference전에 inversion까지만 진행하는 코드.
 
