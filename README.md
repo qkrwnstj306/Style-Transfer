@@ -71,7 +71,7 @@ out = rearrange(out, '(b h) n d -> b n (h d)', h=h)
 
 ### hf_run.py, high_frequency_final.py: 예령님 설명 참조
 
-#Citation
+# Citation
 
 ```BibTeX
 
