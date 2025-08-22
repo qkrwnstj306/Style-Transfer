@@ -1,0 +1,4 @@
+precomputed_feats/
+precomputed_feats_k/
+
+StyleInj/models/ldm/stable-diffusion-v1/model.ckpt
