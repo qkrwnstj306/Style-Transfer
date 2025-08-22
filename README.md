@@ -72,6 +72,7 @@ out = rearrange(out, '(b h) n d -> b n (h d)', h=h)
 ### hf_run.py, high_frequency_final.py: 예령님 설명 참조
 
 #Citation
+
 @InProceedings{Chung_2024_CVPR,
     author    = {Chung, Jiwoo and Hyun, Sangeek and Heo, Jae-Pil},
     title     = {Style Injection in Diffusion: A Training-free Approach for Adapting Large-scale Diffusion Models for Style Transfer},
