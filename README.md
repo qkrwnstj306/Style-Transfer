@@ -73,6 +73,8 @@ out = rearrange(out, '(b h) n d -> b n (h d)', h=h)
 
 #Citation
 
+```BibTeX
+
 @InProceedings{Chung_2024_CVPR,
     author    = {Chung, Jiwoo and Hyun, Sangeek and Heo, Jae-Pil},
     title     = {Style Injection in Diffusion: A Training-free Approach for Adapting Large-scale Diffusion Models for Style Transfer},
@@ -81,3 +83,4 @@ out = rearrange(out, '(b h) n d -> b n (h d)', h=h)
     year      = {2024},
     pages     = {8795-8805}
 }
+```
