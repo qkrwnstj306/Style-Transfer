@@ -1,4 +1,6 @@
 precomputed_feats/
 precomputed_feats_k/
 
-StyleInj/models/ldm/stable-diffusion-v1/model.ckpt
+models/ldm/stable-diffusion-v1/model.ckpt
+saved_qk/*.pkl
+saved_sim/*.pkl
