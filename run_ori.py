@@ -19,8 +19,7 @@ import pickle
 
 ## 마스크 적용
 from ldm.modules.attention import CrossAttention
-#### q,k, sim 저장용 ##### 
-from ldm.modules.attention import SpatialTransformer
+from high_frequency_final import patch_decoder_resblocks_h_and_cnt_hf, make_content_injection_schedule
 
 feat_maps = []
 
@@ -63,6 +62,53 @@ def feat_merge(opt, cnt_feats, sty_feats, start_step=0):
                 feat_maps[i][ori_key + '_cnt'] = cnt_feat[ori_key]
     return feat_maps
 
+## 2가지 style feature와 content feature를 받아서 feat_merge를 수행하는 함수
+def feat_merge_2sty(opt, cnt_feats, sty_feats_1, sty_feats_2, start_step=0):
+    feat_maps = [{
+        'config': {  
+            'gamma': opt.gamma,
+            'T': opt.T,
+            'timestep': i,
+            'cnt_k': None,
+            'sty_q': None,
+        }
+    } for i in range(50)]
+
+    for i in range(len(feat_maps)):
+        if i < (50 - start_step):
+            continue
+
+        cnt_feat = cnt_feats[i]
+        sty_feat_1 = sty_feats_1[i]
+        sty_feat_2 = sty_feats_2[i]
+        ori_keys = cnt_feat.keys()  # q,k,v 다 있음
+
+        for ori_key in ori_keys:
+            # === 기본 설정: content q, style1 k/v ===
+            if ori_key.endswith('q'):
+                feat_maps[i][ori_key] = cnt_feat[ori_key]
+            if ori_key.endswith('k') or ori_key.endswith('v'):
+                feat_maps[i][ori_key] = sty_feat_1[ori_key]
+
+            # === content 복사 ===
+            if ori_key.endswith('k'):
+                feat_maps[i][ori_key + '_cnt'] = cnt_feat[ori_key]
+            if ori_key.endswith('v'):
+                feat_maps[i][ori_key + '_cnt'] = cnt_feat[ori_key]
+
+            # === style1 복사 ===
+            if ori_key.endswith('q'):
+                feat_maps[i][ori_key + '_sty1'] = sty_feat_1[ori_key]
+
+            # === style2 복사 ===
+            if ori_key.endswith('q'):
+                feat_maps[i][ori_key + '_sty2'] = sty_feat_2[ori_key]
+            if ori_key.endswith('k'):
+                feat_maps[i][ori_key + '_sty2'] = sty_feat_2[ori_key]
+            if ori_key.endswith('v'):
+                feat_maps[i][ori_key + '_sty2'] = sty_feat_2[ori_key]
+
+    return feat_maps
 
 def load_img(path):
     image = Image.open(path).convert("RGB")
@@ -125,7 +171,7 @@ def main():
     parser.add_argument('--output_path', type=str, default='output_dk')
     parser.add_argument("--without_init_adain", action='store_true')
     parser.add_argument("--without_attn_injection", action='store_true')
-    parser.add_argument("--no_sampling", action="store_true", help="Skip sampling and save only pkl files.")
+    parser.add_argument("--ratio", default=0.5, type=float, help="content high-freq ratio")
     opt = parser.parse_args()
 
     feat_path_root = opt.precomputed
@@ -210,70 +256,34 @@ def main():
         feat_maps[cur_idx][f"{filename}"] = feature_map
         
     ## residual injection
-    # # 매 DDIM 스텝마다 timestep을 hook 모듈에 설정하는 콜백
-    # def residual_injection_callback(step_idx):
-    #     t = sampler.ddim_timesteps[step_idx]
+    # 매 DDIM 스텝마다 timestep을 hook 모듈에 설정하는 콜백
+    def residual_injection_callback(step_idx):
+        t = sampler.ddim_timesteps[step_idx]
         
-    #     ## ver 3. merged
-    #     # injector.set_timestep(unet_model, t)
-    #     # if hasattr(model, "model_ema"):
-    #     #     injector_ema.set_timestep(model.model_ema.diffusion_model, t)
-        
-    #     ## ver 1 && ver 2 h나 skip만 교체.
-    #     # unet 에 패치된 ResBlock 들에 현재 timestep 설정
-    #     for block_id in range(3, 9):
-    #         if block_id >= len(unet_model.output_blocks):
-    #             break
-    #         for module in reversed(unet_model.output_blocks[block_id]):
-    #             if module.__class__.__name__.endswith("ResBlock"):
-    #                 module.ri_timestep = int(t)
-    #                 break
-    #     # EMA 모델도 동일하게
-    #     if hasattr(model, "model_ema"):
-    #         ema_unet = model.model_ema.diffusion_model
-    #         for block_id in range(3, 9):
-    #             if block_id >= len(ema_unet.output_blocks):
-    #                 break
-    #             for module in reversed(ema_unet.output_blocks[block_id]):
-    #                 if module.__class__.__name__.endswith("ResBlock"):
-    #                     module.ri_timestep = int(t)
-    #                     break
-                    
-    # def extract_layer9_feat_callback(step_idx):
-    #     """
-    #     DDIM 샘플링 중 timestep==420일 때,
-    #     decoder layer l=9 의 self-attention Q feature만 저장.
-    #     """
-    #     t = sampler.ddim_timesteps[step_idx]
-    #     if t == 421 and not extract_layer9_feat_callback.done:
-    #         # 디코더 블록 9
-    #         block9 = unet_model.output_blocks[9]
-    #         for module in block9:
-    #             if isinstance(module, SpatialTransformer):
-    #                 # transformer_blocks[0].attn1.q 를 꺼내서
-    #                 q_feat = module.transformer_blocks[0].attn1.q.detach().cpu()
-    #                 k_feat = module.transformer_blocks[0].attn1.k.detach().cpu()
-    #                 # # 저장 경로
-    #                 # save_path = os.path.join(output_path, "original_feats_9.pkl")
-    #                 # 저장 경로 (h injection용)
-    #                 save_path = os.path.join(output_path, "injected_feats_9_4.pkl")
-    #                 os.makedirs(os.path.dirname(save_path), exist_ok=True)
-    #                 with open(save_path, "wb") as f:
-    #                     pickle.dump({'q': q_feat, 'k': k_feat}, f)
-    #                 print(f"[Layer9FeatureExtraction] Saved layer 9 features to {save_path}")
-    #                 extract_layer9_feat_callback.done = True
-    #                 break
-            
-    # # 상태 플래그 초기화
-    # extract_layer9_feat_callback.done = False
+        # residual_high 저장 경로에서 불러오기
+        # 예: precomputed_feats/.../{image_name}_residuals_all.pkl
+        # 현재 content 이미지의 high-freq residual 불러오기
 
-    # # 2) 두 콜백을 한 번에 호출하는 래퍼를 정의합니다.
-    # def combined_callback(step_idx):
-    #     residual_injection_callback(step_idx)
-    #     extract_layer9_feat_callback(step_idx)
-        
-    
-    
+        for block_id in range(6, 12):
+            if block_id >= len(unet_model.output_blocks):
+                break
+
+            for module in reversed(unet_model.output_blocks[block_id]):
+                if module.__class__.__name__.endswith("ResBlock"):
+                    module.ri_timestep = int(t)
+                    break
+                # EMA 모델도 동일하게
+
+        if hasattr(model, "model_ema"):
+            ema_unet = model.model_ema.diffusion_model
+            for block_id in range(6, 12):
+                if block_id >= len(ema_unet.output_blocks):
+                    break
+                for module in reversed(ema_unet.output_blocks[block_id]):
+                    if module.__class__.__name__.endswith("ResBlock"):
+                        module.ri_timestep = int(t)
+                        break
+
     start_step = opt.start_step
     precision_scope = autocast if opt.precision=="autocast" else nullcontext
     uc = model.get_learned_conditioning([""])
@@ -292,11 +302,37 @@ def main():
         f for f in os.listdir(opt.cnt)
         if f.lower().endswith(IMG_EXTENSIONS)
     ])
-    
+
     begin = time.time()
-    for sty_name in sty_img_list:
+    """Single-Style Transfer"""
+    # for sty_name in sty_img_list:
+    #     sty_name_ = os.path.join(opt.sty, sty_name)
+    #     init_sty = load_img(sty_name_).to(device)
+    #     seed = -1
+    #     sty_feat_name = os.path.join(feat_path_root, os.path.basename(sty_name).split('.')[0] + '_sty.pkl')
+    #     sty_z_enc = None
+
+    #     if len(feat_path_root) > 0 and os.path.isfile(sty_feat_name):
+    #         print("Precomputed style feature loading: ", sty_feat_name)
+    #         with open(sty_feat_name, 'rb') as h:
+    #             sty_feat = pickle.load(h)
+    #             sty_z_enc = torch.clone(sty_feat[0]['z_enc'])
+    #     else:
+    #         init_sty = model.get_first_stage_encoding(model.encode_first_stage(init_sty))
+    #         sty_z_enc, _ = sampler.encode_ddim(init_sty.clone(), num_steps=ddim_inversion_steps, unconditional_conditioning=uc, \
+    #                                             end_step=time_idx_dict[ddim_inversion_steps-1-start_step], \
+    #                                             callback_ddim_timesteps=save_feature_timesteps,
+    #                                             img_callback=ddim_sampler_callback)
+    #         sty_feat = copy.deepcopy(feat_maps)
+    #         sty_z_enc = feat_maps[0]['z_enc']
+
+    """Multi-Style Transfer"""
+    sty_feats = []
+    sty_z_enc_list = []
+    for idx, sty_name in enumerate(sty_img_list):
         sty_name_ = os.path.join(opt.sty, sty_name)
         init_sty = load_img(sty_name_).to(device)
+
         seed = -1
         sty_feat_name = os.path.join(feat_path_root, os.path.basename(sty_name).split('.')[0] + '_sty.pkl')
         sty_z_enc = None
@@ -306,6 +342,9 @@ def main():
             with open(sty_feat_name, 'rb') as h:
                 sty_feat = pickle.load(h)
                 sty_z_enc = torch.clone(sty_feat[0]['z_enc'])
+                #style의 pkl 파일에 저장된 feat_maps를 불러와 sty1,2를 저장
+                sty_feats.append(sty_feat)# sty의 feat_maps를 저장
+                sty_z_enc_list.append(sty_z_enc)# sty의 z_enc를 저장
         else:
             init_sty = model.get_first_stage_encoding(model.encode_first_stage(init_sty))
             sty_z_enc, _ = sampler.encode_ddim(init_sty.clone(), num_steps=ddim_inversion_steps, unconditional_conditioning=uc, \
@@ -315,136 +354,141 @@ def main():
             sty_feat = copy.deepcopy(feat_maps)
             sty_z_enc = feat_maps[0]['z_enc']
 
-
-        for cnt_name in cnt_img_list:
-            cnt_name_ = os.path.join(opt.cnt, cnt_name)
-            init_cnt = load_img(cnt_name_).to(device)
-            cnt_feat_name = os.path.join(feat_path_root, os.path.basename(cnt_name).split('.')[0] + '_cnt.pkl')
-            cnt_feat = None
             
-            # # ────── 여기서 residual injection 준비 ──────
-           
-            # # content image의 확장자를 자동으로 감지하여 residual path 생성
-            # cnt_base_name = os.path.basename(cnt_name)
+    sty_feat_1, sty_feat_2 = sty_feats
+    sty_z_enc_1, sty_z_enc_2 = sty_z_enc_list
 
-            # cnt_no_ext, _ = os.path.splitext(cnt_base_name)
-            # # residuals_all 파일명은 "avril_residuals_all.pkl" 로
-            # residual_path = os.path.join(feat_path_root, f"{cnt_no_ext}_residuals_all.pkl")
-            # if os.path.exists(residual_path):
-            #     with open(residual_path, 'rb') as f:
-            #         residuals_all = pickle.load(f)
-            #     print(f"[ResidualInjection] Loaded residuals from {residual_path}")
-            # else:
-            #     residuals_all = None
-            #     print(f"[ResidualInjection] No residuals file at {residual_path}")
+    for cnt_name in cnt_img_list:
+        cnt_name_ = os.path.join(opt.cnt, cnt_name)
+        init_cnt = load_img(cnt_name_).to(device)
+        cnt_feat_name = os.path.join(feat_path_root, os.path.basename(cnt_name).split('.')[0] + '_cnt.pkl')
+        cnt_feat = None
+        
+        # ────── 여기서 residual injection 준비 ──────
+            
+        # content image의 확장자를 자동으로 감지하여 residual path 생성
+        cnt_base_name = os.path.basename(cnt_name)
 
-            # schedule = make_content_injection_schedule(sampler.ddim_timesteps, alpha=0)
+        cnt_no_ext, _ = os.path.splitext(cnt_base_name)
+        # residuals_all 파일명은 "avril_residuals_all.pkl" 로
+        residual_path = os.path.join(feat_path_root, f"{cnt_no_ext}_residuals_all.pkl")
+
+
+        #callback에서 사용할 수 있도록 global 변수에 설정
+        global current_cnt_residuals_all_path
+        current_cnt_residuals_all_path = residual_path
+
+        if os.path.exists(residual_path):
+            with open(residual_path, 'rb') as f:
+                residuals_all = pickle.load(f)
+            print(f"[ResidualInjection] Loaded residuals from {residual_path}")
+        else:
+            residuals_all = None
+            print(f"[ResidualInjection] No residuals file at {residual_path}")
+
+        schedule = make_content_injection_schedule(sampler.ddim_timesteps, alpha=0.4)
+
+        patch_decoder_resblocks_h_and_cnt_hf(unet_model, 
+                                                schedule, 
+                                                residuals_all, ratio=opt.ratio)
+        if hasattr(model, "model_ema"):
+            patch_decoder_resblocks_h_and_cnt_hf(model.model_ema.diffusion_model, 
+                                                    schedule, 
+                                                    residuals_all, ratio=opt.ratio)
+        # # ────────────────────────────────────────────
+
+        # ddim inversion encoding
+        if len(feat_path_root) > 0 and os.path.isfile(cnt_feat_name):
+            print("Precomputed content feature loading: ", cnt_feat_name)
+            with open(cnt_feat_name, 'rb') as h:
+                cnt_feat = pickle.load(h)
+                cnt_z_enc = torch.clone(cnt_feat[0]['z_enc'])
+        else:
+            init_cnt = model.get_first_stage_encoding(model.encode_first_stage(init_cnt))
+            cnt_z_enc, _ = sampler.encode_ddim(init_cnt.clone(), num_steps=ddim_inversion_steps, unconditional_conditioning=uc, \
+                                                end_step=time_idx_dict[ddim_inversion_steps-1-start_step], \
+                                                callback_ddim_timesteps=save_feature_timesteps,
+                                                img_callback=ddim_sampler_callback)
+            cnt_feat = copy.deepcopy(feat_maps)
+            cnt_z_enc = feat_maps[0]['z_enc']
+
+        with torch.no_grad():
+            with precision_scope("cuda"):
+                with model.ema_scope():
+                    output_name = f"{os.path.basename(cnt_name).split('.')[0]}_stylized_{os.path.basename(sty_name).split('.')[0]}.png"
+                    
+                    print(f"Inversion end: {time.time() - begin}")
+                    
+                    if opt.without_init_adain:
+                        adain_z_enc = cnt_z_enc
+                    else:
+                        # adain_z_enc = adain(cnt_z_enc, sty_z_enc)
+                        mask = torch.tensor(np.load(os.path.join(opt.cnt, f"{os.path.basename(cnt_name).split('.')[0]}_mask.npy")), dtype=torch.float32).to(device)
+                        mask = mask.unsqueeze(0).unsqueeze(0)
+                        mask = F.interpolate(mask, size=(cnt_z_enc.shape[2], cnt_z_enc.shape[3]), mode="bilinear", align_corners=False)
+                        mask = mask.expand(-1, cnt_z_enc.shape[1], -1, -1)
+                        adain_z_enc = mask * adain(cnt_z_enc, sty_z_enc_1) + (1-mask) * adain(cnt_z_enc, sty_z_enc_2)
+
+                    feat_maps = feat_merge_2sty(opt, cnt_feat, sty_feat_1, sty_feat_2, start_step=start_step)
+                    if opt.without_attn_injection:
+                        feat_maps = None
                         
-            # ## ver 1. h만 교체
-            # patch_resblock_h_only(unet_model,schedule,residuals_all)
-            # if hasattr(model,"model_ema"):
-            #     patch_resblock_h_only(model.model_ema.diffusion_model, schedule, residuals_all)
-            
-            # # ## ver 2. skip 만 교체
-            # # patch_resblock_skip_only(unet_model,schedule,residuals_dict)
-            # # if hasattr(model, "model_ema"):
-            # #     patch_resblock_skip_only(model.model_ema.diffusion_model, schedule, residuals_dict)
-        
-            # # # ver 3. merged 전체 교체
-            # # injector = ResidualInjector(unet_model, schedule, residuals_dict)
-            # # if hasattr(model, "model_ema"):
-            # #     injector_ema = ResidualInjector(model.model_ema.diffusion_model, schedule, residuals_dict)
-            
-                
-            # # ────────────────────────────────────────────
-        
-            # ddim inversion encoding
-            if len(feat_path_root) > 0 and os.path.isfile(cnt_feat_name):
-                print("Precomputed content feature loading: ", cnt_feat_name)
-                with open(cnt_feat_name, 'rb') as h:
-                    cnt_feat = pickle.load(h)
-                    cnt_z_enc = torch.clone(cnt_feat[0]['z_enc'])
-            else:
-                init_cnt = model.get_first_stage_encoding(model.encode_first_stage(init_cnt))
-                cnt_z_enc, _ = sampler.encode_ddim(init_cnt.clone(), num_steps=ddim_inversion_steps, unconditional_conditioning=uc, \
-                                                    end_step=time_idx_dict[ddim_inversion_steps-1-start_step], \
-                                                    callback_ddim_timesteps=save_feature_timesteps,
-                                                    img_callback=ddim_sampler_callback)
-                cnt_feat = copy.deepcopy(feat_maps)
-                cnt_z_enc = feat_maps[0]['z_enc']
+                    print(f"{sty_name_}, {cnt_name_}")
+                    
+                    ## 마스크 적용
+                    for m in unet_model.modules():
+                        if isinstance(m, CrossAttention):
+                            m.sty_name = sty_name_
+                            m.cnt_name = cnt_name_
+                    
+                    # # ─── q, k, sim 저장용 ───
+                    # # style/content 이름을 파일명에 반영하고, 매번 리셋
+                    # target_block = unet_model.output_blocks[target_layer]
+                    # for module in target_block:
+                    #     if isinstance(module, SpatialTransformer):
+                    #         module.transformer_blocks[0].attn1.target_t_list =target_t_list
+                    #         module.transformer_blocks[0].attn1.cnt_name=cnt_name_
+                    #         module.transformer_blocks[0].attn1.sty_name=sty_name_
+                    #         module.transformer_blocks[0].attn1.layer_id=target_layer
+                            
+                    
+                    # inference
+                    samples_ddim, intermediates = sampler.sample(
+                        S=ddim_steps,
+                        batch_size=1,
+                        shape=shape,
+                        verbose=False,
+                        unconditional_conditioning=uc,
+                        eta=opt.ddim_eta,
+                        x_T=adain_z_enc,
+                        injected_features=feat_maps,
+                        start_step=start_step,
+                        # ## 마스크 적용
+                        sty_name=sty_name_,
+                        cnt_name=cnt_name_,
+                        # # ## residual injection
+                        callback=residual_injection_callback,
+                        ### q, k, sim 저장
+                        injection_config={'timestep': t}
+                    )
 
-            if not opt.no_sampling:
-                with torch.no_grad():
-                    with precision_scope("cuda"):
-                        with model.ema_scope():
-                            output_name = f"{os.path.basename(cnt_name).split('.')[0]}_stylized_{os.path.basename(sty_name).split('.')[0]}.png"
-                            
-                            print(f"Inversion end: {time.time() - begin}")
-                            
-                            if opt.without_init_adain:
-                                adain_z_enc = cnt_z_enc
-                            else:
-                                adain_z_enc = adain(cnt_z_enc, sty_z_enc)
-                            feat_maps = feat_merge(opt, cnt_feat, sty_feat, start_step=start_step)
-                            if opt.without_attn_injection:
-                                feat_maps = None
-                                
-                            print(f"{sty_name_}, {cnt_name_}")
-                            
-                            ## 마스크 적용
-                            for m in unet_model.modules():
-                                if isinstance(m, CrossAttention):
-                                    m.sty_name = sty_name_
-                                    m.cnt_name = cnt_name_
-                            
-                            # # ─── q, k, sim 저장용 ───
-                            # # style/content 이름을 파일명에 반영하고, 매번 리셋
-                            # target_block = unet_model.output_blocks[target_layer]
-                            # for module in target_block:
-                            #     if isinstance(module, SpatialTransformer):
-                            #         module.transformer_blocks[0].attn1.target_t_list =target_t_list
-                            #         module.transformer_blocks[0].attn1.cnt_name=cnt_name_
-                            #         module.transformer_blocks[0].attn1.sty_name=sty_name_
-                            #         module.transformer_blocks[0].attn1.layer_id=target_layer
-                                    
-                            
-                            # inference
-                            samples_ddim, intermediates = sampler.sample(
-                                S=ddim_steps,
-                                batch_size=1,
-                                shape=shape,
-                                verbose=False,
-                                unconditional_conditioning=uc,
-                                eta=opt.ddim_eta,
-                                x_T=adain_z_enc,
-                                injected_features=feat_maps,
-                                start_step=start_step,
-                                # ## 마스크 적용
-                                sty_name=sty_name_,
-                                cnt_name=cnt_name_,
-                                # # ## residual injection
-                                # callback=residual_injection_callback,
-                                ### q, k, sim 저장
-                                injection_config={'timestep': t}
-                            )
+                    x_samples_ddim = model.decode_first_stage(samples_ddim)
+                    x_samples_ddim = torch.clamp((x_samples_ddim + 1.0) / 2.0, min=0.0, max=1.0)
+                    x_samples_ddim = x_samples_ddim.cpu().permute(0, 2, 3, 1).numpy()
+                    x_image_torch = torch.from_numpy(x_samples_ddim).permute(0, 3, 1, 2)
+                    x_sample = 255. * rearrange(x_image_torch[0].cpu().numpy(), 'c h w -> h w c')
+                    img = Image.fromarray(x_sample.astype(np.uint8))
 
-                            x_samples_ddim = model.decode_first_stage(samples_ddim)
-                            x_samples_ddim = torch.clamp((x_samples_ddim + 1.0) / 2.0, min=0.0, max=1.0)
-                            x_samples_ddim = x_samples_ddim.cpu().permute(0, 2, 3, 1).numpy()
-                            x_image_torch = torch.from_numpy(x_samples_ddim).permute(0, 3, 1, 2)
-                            x_sample = 255. * rearrange(x_image_torch[0].cpu().numpy(), 'c h w -> h w c')
-                            img = Image.fromarray(x_sample.astype(np.uint8))
-
-                            img.save(os.path.join(output_path, output_name))
-                            
-                        if len(feat_path_root) > 0:
-                            print("Save features")
-                            if not os.path.isfile(cnt_feat_name):
-                                with open(cnt_feat_name, 'wb') as h:
-                                    pickle.dump(cnt_feat, h)
-                            if not os.path.isfile(sty_feat_name):
-                                with open(sty_feat_name, 'wb') as h:
-                                    pickle.dump(sty_feat, h)
+                    img.save(os.path.join(output_path, output_name))
+                    
+                if len(feat_path_root) > 0:
+                    print("Save features")
+                    if not os.path.isfile(cnt_feat_name):
+                        with open(cnt_feat_name, 'wb') as h:
+                            pickle.dump(cnt_feat, h)
+                    if not os.path.isfile(sty_feat_name):
+                        with open(sty_feat_name, 'wb') as h:
+                            pickle.dump(sty_feat, h)
 
     print(f"Total end: {time.time() - begin}")
 

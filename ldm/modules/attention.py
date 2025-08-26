@@ -186,6 +186,9 @@ class CrossAttention(nn.Module):
         self.v = None
         self.qk_sim = None
         
+        ## generated pkl
+        self.gen_pkl = False
+
         ## 마스크 적용
         self.sty_name = None
         self.cnt_name = None
@@ -204,7 +207,7 @@ class CrossAttention(nn.Module):
         return sim 
     
     
-    def get_batch_sim_with_mask(self, cc_sim, delta_q, delta_k, q, k, num_heads, sty_name, cnt_name, mask_path=None, attn_matrix_scale=1.0, injection_config=None,target_t_list=None):
+    def get_batch_sim_with_mask(self, cc_sim, delta_q, delta_k, q, k, num_heads, sty_name, cnt_name, mask_path=None, attn_matrix_scale=1.0, ch=None, injection_config=None, target_t_list=None):
       
         q = rearrange(q, "(b h) n d -> h (b n) d", h=num_heads)
         k = rearrange(k, "(b h) n d -> h (b n) d", h=num_heads)
@@ -267,7 +270,7 @@ class CrossAttention(nn.Module):
         mask = torch.tensor(np.load(mask_path), dtype=torch.float32).cuda()
         mask[mask < 0.5] = -1.0
         mask[mask > 0.5] = 1.0
-        mask *= -1.0
+        mask = mask * ch #mask 영역별로 다르게 주기
         
     
         mask = mask.unsqueeze(0).unsqueeze(0)
@@ -281,7 +284,7 @@ class CrossAttention(nn.Module):
         gradual_vanished_array = mask.reshape(1, h, w, 1).to(sim.device)
         delta = min_cc_sim_reshaped - max_sim_reshaped
         gradual_vanished_mask = (delta)[:, :, :, :] * gradual_vanished_array
-        print(f"gradual_vanished_mask shape: {gradual_vanished_mask.shape}")
+        #print(f"gradual_vanished_mask shape: {gradual_vanished_mask.shape}")
         sim_reshaped[:, :length, :, :] += gradual_vanished_mask
         
         sim = sim_reshaped.reshape(head_num, pixel_size, pixel_size)
@@ -351,12 +354,16 @@ class CrossAttention(nn.Module):
                 x,
                 context=None,
                 mask=None,
-                q_injected=None, 
-                k_injected=None, 
-                v_injected=None, 
+                q_injected=None,
+                k_injected=None,
+                v_injected=None,
                 cnt_k_injected=None,
                 sty_q_injected=None,
                 cnt_v_injected=None,
+                ##2개의 스타일 인젝션
+                sty2_q_injected=None,
+                sty2_k_injected=None,
+                sty2_v_injected=None,
                 injection_config=None,):
         self.attn = None
         batch, seq_len, _ = x.shape
@@ -392,8 +399,7 @@ class CrossAttention(nn.Module):
             q_ = rearrange(q_, 'b n (h d) -> (b h) n d', h=h)
             
             # q = q_in
-            q = q_in * 0.5 + (1. - 0.5) * q_ #content query가 q_in이다.
-           
+            q = q_in * q_mix + q_ * (1. - 0.5) #content query가 q_in이다.
             
         context = default(context, x)
 
@@ -419,215 +425,237 @@ class CrossAttention(nn.Module):
         self.q = q
         self.k = k
         self.v = v
-        
-       
-        
-        
+
         ##################### 마스크 적용 시작 ######################
-        mask_path = self.cnt_name.replace(".jpg", "_mask.npy")
-        is_mask_exists = os.path.exists(mask_path)  # mask_path가 존재하는지 확인
-        
-        use_mask = (
-            self.sty_name is not None
-            and self.cnt_name is not None
-            and not is_cross
-            and is_mask_exists
-        )
-        
-
-
-        if use_mask:
-            self.sty_name = os.path.basename(self.sty_name)
-            if q_injected is not None and k_injected is not None:
-                # ## ver 1. Q^cs StyleID 그대로 사용
-                # q_cnt = copy.deepcopy(self.q)
-                # ver 2. z*처럼 q_cnt는 only content query
-                q_cnt = q_in
-
-                k_cnt = torch.cat([cnt_k_injected]*b, dim=0)
-                q_sty = torch.cat([sty_q_injected]*b, dim=0)
-                v_cnt = torch.cat([cnt_v_injected]*b, dim=0)
-                
-                cc_sim = self.get_batch_sim(
-                    q=q_cnt,
-                    k=k_cnt,
-                    num_heads=h,
-                )
-                
-
-                ### self.q 저장
-                # 내가 지정한 layer·내가 지정한 timestep 에서만 q,k 저장
-                # 1) Q/K 캡처용 플래그 + 유효한 dict일 때만 get() 호출
-                if isinstance(injection_config, dict) and self.target_t_list is not None:
-                    t = injection_config.get('timestep')
-                    if t in self.target_t_list:
-                        # 1) raw q/k 뽑아오기
-                        raw_q = self.to_q(x).detach().cpu()         # (1, N, heads*d)
-                        raw_k = self.to_k(x).detach().cpu()  # (1, N, heads*d)
-
-                        # 2) (1, N, heads*d) → (1, N, heads, d) → (heads, N, d)
-                        B, N, C = raw_q.shape
-                        heads = self.heads
-                        d     = C // heads
-                        q     = raw_q.view(B, N, heads, d).permute(0,2,1,3).squeeze(0)  # (heads, N, d)
-                        k     = raw_k.view(B, N, heads, d).permute(0,2,1,3).squeeze(0)  # (heads, N, d)
-
-                        # 3) 원하는 키 이름
-                        q_key = f"output_block_{self.layer_id}_self_attn_q"
-                        k_key = f"output_block_{self.layer_id}_self_attn_k"
-
-                        # 4) 리스트-of-dict 포맷으로 패키징
-                        feat_list = [{ q_key: q, k_key: k }]
-
-                        # 5) 디스크에 저장
-                        save_dir = 'saved_qk'
-                        os.makedirs(save_dir, exist_ok=True)
-                        cnt_basename = os.path.basename(self.cnt_name)
-                        fn   = f"layer{self.layer_id}_t{t+1}_{self.sty_name}_{cnt_basename}_qk.pkl"
-                        path = os.path.join(save_dir, fn)
-                        with open(path, 'wb') as f:
-                            pickle.dump(feat_list, f)
-                        print(f"[QKCapture] saved q,k → {path}")
-                        # ───────────────────────────────────────────────────────────
-                
-                
-                sim = self.get_batch_sim_with_mask(
-                    cc_sim=cc_sim,
-                    q=self.q, ##  self.q 면 q_cs를 의미, q_cnt면 감마가 적용되지않은 cnt그대로
-                    delta_q=q_cnt,
-                    delta_k=self.k, # self.k = k_sty와 같음. inject당시 sty에서 key와 value를 가져오기 때문.
-                    k=self.k,
-                    num_heads=h,
-                    sty_name=self.sty_name,
-                    cnt_name=self.cnt_name,
-                    mask_path=mask_path,
-                    attn_matrix_scale=attn_matrix_scale,
-                    injection_config=injection_config,
-                    target_t_list=self.target_t_list,
-                )
-                
-                h, BN, _ = sim.shape
-                B = b
-                N = BN // B
-                # 1) (h, B*N, B*N) -> (h, B, N, B, N)
-                sim = sim.view(h, B, N, B, N)
-                # 2) (h, B, N, B, N) -> (B, h, N, B, N)
-                sim = sim.permute(1, 0, 2, 3, 4)
-                sim = sim.reshape(B*h, N, N)
-                
-                attn = sim.softmax(dim=-1)
-               
-                self.attn = attn
-                out = einsum('b i j, b j d -> b i d', attn, v)
-                
-                
-                cc_sim  = cc_sim.view(h, B, N, B, N)
-                cc_sim = cc_sim.permute(1, 0, 2, 3, 4)
-                cc_sim = cc_sim.reshape(B*h, N, N)
-                
+        if not self.gen_pkl:
+            mask_path = self.cnt_name.replace(".jpg", "_mask.npy")
+            is_mask_exists = os.path.exists(mask_path)  # mask_path가 존재하는지 확인
             
-                
-                
-                
-                # # 오메가 마스크 적용 ###################
-                # if mask_path is not None and self.sty_name == "c_style.jpg":
-                #     mask = torch.tensor(np.load(mask_path), dtype=torch.float32).cuda()
-                    
-                # # # 수정본, 배경에 마스크 적용
-                # elif mask_path is not None and self.sty_name == "b_style.jpg":
-                #     mask = torch.tensor(np.load(mask_path), dtype=torch.float32).cuda()
-                #     mask = 1.0 - mask   # 배경용 반전
-                    
-                # else:
-                #     print("ERROR: mask npy not found!!!")
-                #     mask = torch.tensor([[1., 1., 1., 1.],
-                #                         [1., -1., -1., 1.],
-                #                         [1., -1., -1., 1.],
-                #                         [-1., -1., -1., -1.]], dtype=torch.float32).cuda()
-                
-                # mask = mask.unsqueeze(0).unsqueeze(0)
-                # H, N, D = out.shape 
-                # mask = F.interpolate(mask, size=(int(math.sqrt(out.shape[1])),
-                #                      int(math.sqrt(out.shape[1]))),
-                #          mode='bilinear', align_corners=False)
-                
-                # mask = mask.view(1, N, 1)              # (1, N, 1)
-                # mask = mask.expand(H, -1, -1)          # (H, N, 1)
+            use_mask = (
+                self.sty_name is not None
+                and self.cnt_name is not None
+                and not is_cross
+                and is_mask_exists
+            )
+            
 
-                # # style/content blend (head별 동일 mask 적용)
-                # attn_cnt = cc_sim.softmax(dim=-1)
-                # out_cnt = einsum('b i j, b j d -> b i d', attn_cnt, v_cnt)
-                # # out = mask * out + (1-mask) * out_cnt
-                # # cat 아닐 때,
-                # out = rearrange(out, '(b h) n d -> b n (h d)', h=h)
-                # # 오메가 마스크 적용 ###################
-                
-                
-                ### z* 방식 ############
-                cat_sim = torch.cat((sim, cc_sim), 2)
-                cat_v = torch.cat((v, v_cnt), 1)
-                
-                cat_sim = cat_sim.softmax(-1)
-                
-                cat_out = einsum('b i j, b j d -> b i d', cat_sim, cat_v)
-                # cat시에는
-                out = rearrange(cat_out, 'h (b n) d -> b n (h d)', h=h, b=b)
-                ### z* 방식 ############
-                
-                
 
+            if use_mask:
+                self.sty_name = os.path.basename(self.sty_name)
+                if q_injected is not None and k_injected is not None:
+                    # ## ver 1. Q^cs StyleID 그대로 사용
+                    # q_cnt = copy.deepcopy(self.q)
+                    # ver 2. z*처럼 q_cnt는 only content query
+                    q_cnt = q_in
+                    k_cnt = torch.cat([cnt_k_injected]*b, dim=0)
+                    v_cnt = torch.cat([cnt_v_injected]*b, dim=0)
+
+                    # k_cnt = torch.cat([cnt_k_injected]*b, dim=0)
+                    # q_sty = torch.cat([sty_q_injected]*b, dim=0)
+                    # v_cnt = torch.cat([cnt_v_injected]*b, dim=0)
+
+                    k_sty_2 = torch.cat([sty2_k_injected]*b, dim=0)
+                    v_sty_2 = torch.cat([sty2_v_injected]*b, dim=0)
+                    
+                    cc_sim = self.get_batch_sim(
+                        q=q_cnt,
+                        k=k_cnt,
+                        num_heads=h,
+                    )
+                    
+
+                    ### self.q 저장
+                    # 내가 지정한 layer·내가 지정한 timestep 에서만 q,k 저장
+                    # 1) Q/K 캡처용 플래그 + 유효한 dict일 때만 get() 호출
+                    if isinstance(injection_config, dict) and self.target_t_list is not None:
+                        t = injection_config.get('timestep')
+                        if t in self.target_t_list:
+                            # 1) raw q/k 뽑아오기
+                            raw_q = self.to_q(x).detach().cpu()         # (1, N, heads*d)
+                            raw_k = self.to_k(x).detach().cpu()  # (1, N, heads*d)
+
+                            # 2) (1, N, heads*d) → (1, N, heads, d) → (heads, N, d)
+                            B, N, C = raw_q.shape
+                            heads = self.heads
+                            d     = C // heads
+                            q     = raw_q.view(B, N, heads, d).permute(0,2,1,3).squeeze(0)  # (heads, N, d)
+                            k     = raw_k.view(B, N, heads, d).permute(0,2,1,3).squeeze(0)  # (heads, N, d)
+
+                            # 3) 원하는 키 이름
+                            q_key = f"output_block_{self.layer_id}_self_attn_q"
+                            k_key = f"output_block_{self.layer_id}_self_attn_k"
+
+                            # 4) 리스트-of-dict 포맷으로 패키징
+                            feat_list = [{ q_key: q, k_key: k }]
+
+                            # 5) 디스크에 저장
+                            save_dir = 'saved_qk'
+                            os.makedirs(save_dir, exist_ok=True)
+                            cnt_basename = os.path.basename(self.cnt_name)
+                            fn   = f"layer{self.layer_id}_t{t+1}_{self.sty_name}_{cnt_basename}_qk.pkl"
+                            path = os.path.join(save_dir, fn)
+                            with open(path, 'wb') as f:
+                                pickle.dump(feat_list, f)
+                            print(f"[QKCapture] saved q,k → {path}")
+                            # ───────────────────────────────────────────────────────────
+                    
+                    
+                    sim_1 = self.get_batch_sim_with_mask(
+                        cc_sim=cc_sim,
+                        q=self.q, ##  self.q 면 q_cs를 의미, q_cnt면 감마가 적용되지않은 cnt그대로
+                        delta_q=self.q, # Qcs
+                        delta_k=self.k, # self.k = k_sty와 같음. inject당시 sty에서 key와 value를 가져오기 때문.
+                        k=self.k,
+                        num_heads=h,
+                        sty_name=self.sty_name,
+                        cnt_name=self.cnt_name,
+                        mask_path=mask_path,
+                        attn_matrix_scale=attn_matrix_scale,
+                        ch = -1.0,
+                        injection_config=injection_config,
+                        target_t_list=self.target_t_list,
+                    )
+                    
+                    # Back
+                    sim_2 = self.get_batch_sim_with_mask(
+                        cc_sim=cc_sim,
+                        q=self.q, ##  self.q 면 q_cs를 의미, q_cnt면 감마가 적용되지않은 cnt그대로
+                        delta_q=self.q, # Qcs,
+                        delta_k=k_sty_2, # stlye_2 key
+                        k=k_sty_2,
+                        num_heads=h,
+                        sty_name=self.sty_name,
+                        cnt_name=self.cnt_name,
+                        mask_path=mask_path,
+                        attn_matrix_scale=attn_matrix_scale,
+                        ch = 1.0,
+                    )# Qcs Ks2 + a2
+
+                    # h, BN, _ = sim.shape
+                    # B = b
+                    # N = BN // B
+                    # # 1) (h, B*N, B*N) -> (h, B, N, B, N)
+                    # sim = sim.view(h, B, N, B, N)
+                    # # 2) (h, B, N, B, N) -> (B, h, N, B, N)
+                    # sim = sim.permute(1, 0, 2, 3, 4)
+                    # sim = sim.reshape(B*h, N, N)
+                    
+                    # attn = sim.softmax(dim=-1)
                 
+                    # self.attn = attn
+                    # out = einsum('b i j, b j d -> b i d', attn, v)
+                    
+                    
+                    # cc_sim  = cc_sim.view(h, B, N, B, N)
+                    # cc_sim = cc_sim.permute(1, 0, 2, 3, 4)
+                    # cc_sim = cc_sim.reshape(B*h, N, N)
+                    
                 
+                    
+                    
+                    
+                    # # 오메가 마스크 적용 ###################
+                    # if mask_path is not None and self.sty_name == "c_style.jpg":
+                    #     mask = torch.tensor(np.load(mask_path), dtype=torch.float32).cuda()
+                        
+                    # # # 수정본, 배경에 마스크 적용
+                    # elif mask_path is not None and self.sty_name == "b_style.jpg":
+                    #     mask = torch.tensor(np.load(mask_path), dtype=torch.float32).cuda()
+                    #     mask = 1.0 - mask   # 배경용 반전
+                        
+                    # else:
+                    #     print("ERROR: mask npy not found!!!")
+                    #     mask = torch.tensor([[1., 1., 1., 1.],
+                    #                         [1., -1., -1., 1.],
+                    #                         [1., -1., -1., 1.],
+                    #                         [-1., -1., -1., -1.]], dtype=torch.float32).cuda()
+                    
+                    # mask = mask.unsqueeze(0).unsqueeze(0)
+                    # H, N, D = out.shape 
+                    # mask = F.interpolate(mask, size=(int(math.sqrt(out.shape[1])),
+                    #                      int(math.sqrt(out.shape[1]))),
+                    #          mode='bilinear', align_corners=False)
+                    
+                    # mask = mask.view(1, N, 1)              # (1, N, 1)
+                    # mask = mask.expand(H, -1, -1)          # (H, N, 1)
+
+                    # # style/content blend (head별 동일 mask 적용)
+                    # attn_cnt = cc_sim.softmax(dim=-1)
+                    # out_cnt = einsum('b i j, b j d -> b i d', attn_cnt, v_cnt)
+                    # # out = mask * out + (1-mask) * out_cnt
+                    # # cat 아닐 때,
+                    # out = rearrange(out, '(b h) n d -> b n (h d)', h=h)
+                    # # 오메가 마스크 적용 ###################
+                    
+                    
+
+                    cat_sim = torch.cat((sim_1, sim_2, cc_sim), 2)
+                    # batch 차원 맞추기
+                    cat_v = torch.cat((v, v_sty_2, v_cnt), 1)# stlye_1 value, stlye_2 value, content value
+
+                    cat_sim = cat_sim.softmax(-1)
+
+                    cat_out = einsum('b i j, b j d -> b i d', cat_sim, cat_v)
+                    # cat시에는
+                    out = rearrange(cat_out, 'h (b n) d -> b n (h d)', h=h, b=b)
+
+
+                    
+                    
+
+                    
+                    
+                    
+                # style injection이 일어나지 않는 경우 -- 원본과 동일하게 진행
+                else:
+                    sim = einsum('b i d, b j d -> b i j', q, k)
+                    sim *= attn_matrix_scale
+                    sim *= self.scale
+                    attn = sim.softmax(dim=-1)
+                    self.attn = attn
+                    
+                    
+                    out = einsum('b i j, b j d -> b i d', attn, v)
                 
-            # style injection이 일어나지 않는 경우 -- 원본과 동일하게 진행
+                    out = rearrange(out, '(b h) n d -> b n (h d)', h=h)
+                    
+            # {마스크용 npy파일이 없으면 마스킹 적용 x} or {self.attn2 즉, cross-attention}  -- 원본과 동일하게 진행  
             else:
                 sim = einsum('b i d, b j d -> b i j', q, k)
-                sim *= attn_matrix_scale
+                if q_injected is not None or k_injected is not None:
+                # print(attn_matrix_scale, 'attn_matrix_scale')
+                    sim *= attn_matrix_scale    
                 sim *= self.scale
                 attn = sim.softmax(dim=-1)
                 self.attn = attn
-                
-                
+
                 out = einsum('b i j, b j d -> b i d', attn, v)
-            
                 out = rearrange(out, '(b h) n d -> b n (h d)', h=h)
                 
-        # {마스크용 npy파일이 없으면 마스킹 적용 x} or {self.attn2 즉, cross-attention}  -- 원본과 동일하게 진행  
+                # print(f"마스크 적용 안함, sim.shape: {sim.shape} \n")
+        ################# 마스크 적용 끝 ###################
+        
         else:
+        ################# 원본 ###################
             sim = einsum('b i d, b j d -> b i j', q, k)
-            if q_injected is not None or k_injected is not None:
-            # print(attn_matrix_scale, 'attn_matrix_scale')
-                sim *= attn_matrix_scale    
+            
+            
             sim *= self.scale
+            self.qk_sim = sim
+
+            if exists(mask):
+                mask = rearrange(mask, 'b ... -> b (...)')
+                max_neg_value = -torch.finfo(sim.dtype).max
+                mask = repeat(mask, 'b j -> (b h) () j', h=h)
+                sim.masked_fill_(~mask, max_neg_value)
+
+            # attention, what we cannot get enough of
             attn = sim.softmax(dim=-1)
             self.attn = attn
 
             out = einsum('b i j, b j d -> b i d', attn, v)
             out = rearrange(out, '(b h) n d -> b n (h d)', h=h)
-            
-            # print(f"마스크 적용 안함, sim.shape: {sim.shape} \n")
-        ################# 마스크 적용 끝 ###################
-        
-        # ################## 원본 ###################
-        # sim = einsum('b i d, b j d -> b i j', q, k)
-        
-        
-        # sim *= self.scale
-        # self.qk_sim = sim
-
-        # if exists(mask):
-        #     mask = rearrange(mask, 'b ... -> b (...)')
-        #     max_neg_value = -torch.finfo(sim.dtype).max
-        #     mask = repeat(mask, 'b j -> (b h) () j', h=h)
-        #     sim.masked_fill_(~mask, max_neg_value)
-
-        # # attention, what we cannot get enough of
-        # attn = sim.softmax(dim=-1)
-        # self.attn = attn
-
-        # out = einsum('b i j, b j d -> b i d', attn, v)
-        # out = rearrange(out, '(b h) n d -> b n (h d)', h=h)
-        # ################## 원본 끝 ###################
+        ################# 원본 끝 ###################
         
         
         return self.to_out(out)
@@ -651,9 +679,15 @@ class BasicTransformerBlock(nn.Module):
                 self_attn_q_injected=None,
                 self_attn_k_injected=None,
                 self_attn_v_injected=None,
+                ## 마스크용
                 self_attn_cnt_k_injected=None,
                 self_attn_sty_q_injected=None,
                 self_attn_cnt_v_injected=None,
+                ## 2개의 스타일 인젝션
+                self_attn_sty2_q_injected=None,
+                self_attn_sty2_k_injected=None,
+                self_attn_sty2_v_injected=None,
+                
                 injection_config=None,
                 ):
         return checkpoint(self._forward, (x,
@@ -661,9 +695,15 @@ class BasicTransformerBlock(nn.Module):
                                           self_attn_q_injected,
                                           self_attn_k_injected,
                                           self_attn_v_injected,
+                                          ##마스크용
                                           self_attn_cnt_k_injected,
                                           self_attn_sty_q_injected,
                                           self_attn_cnt_v_injected,
+                                          ## 2개의 스타일 인젝션
+                                          self_attn_sty2_q_injected,
+                                          self_attn_sty2_k_injected,
+                                          self_attn_sty2_v_injected,
+                                          
                                           injection_config,), self.parameters(), self.checkpoint)
 
     def _forward(self,
@@ -672,17 +712,29 @@ class BasicTransformerBlock(nn.Module):
                  self_attn_q_injected=None,
                  self_attn_k_injected=None,
                  self_attn_v_injected=None,
+                 ##마스크용
                  self_attn_cnt_k_injected=None,
                  self_attn_sty_q_injected=None,
                  self_attn_cnt_v_injected=None,
+                 ##2개의 스타일 인젝션
+                 self_attn_sty2_q_injected=None,
+                 self_attn_sty2_k_injected=None,
+                 self_attn_sty2_v_injected=None,
+                 
                  injection_config=None):
         x_ = self.attn1(self.norm1(x),
                        q_injected=self_attn_q_injected,
                        k_injected=self_attn_k_injected,
                        v_injected=self_attn_v_injected,
+                       #마스크
                        cnt_k_injected=self_attn_cnt_k_injected,
                        sty_q_injected=self_attn_sty_q_injected,
                        cnt_v_injected=self_attn_cnt_v_injected,
+                       ##2개의 스타일 인젝션
+                       sty2_q_injected=self_attn_sty2_q_injected,
+                       sty2_k_injected=self_attn_sty2_k_injected,
+                       sty2_v_injected=self_attn_sty2_v_injected,
+                       
                        injection_config=injection_config,)
         x = x_ + x
         x = self.attn2(self.norm2(x), context=context) + x
@@ -732,6 +784,11 @@ class SpatialTransformer(nn.Module):
                 self_attn_cnt_k_injected=None, 
                 self_attn_sty_q_injected=None,
                 self_attn_cnt_v_injected=None,
+                ##2개의 스타일 인젝션
+                self_attn_sty2_q_injected=None,
+                self_attn_sty2_k_injected=None,
+                self_attn_sty2_v_injected=None,
+                
                 injection_config=None):
         # note: if no context is given, cross-attention defaults to self-attention
         b, c, h, w = x.shape
@@ -750,7 +807,11 @@ class SpatialTransformer(nn.Module):
                       self_attn_cnt_k_injected=self_attn_cnt_k_injected,
                       self_attn_sty_q_injected=self_attn_sty_q_injected,
                       self_attn_cnt_v_injected=self_attn_cnt_v_injected,
-                      
+                      ##2개의 스타일 인젝션
+                      self_attn_sty2_q_injected=self_attn_sty2_q_injected,
+                      self_attn_sty2_k_injected=self_attn_sty2_k_injected,
+                      self_attn_sty2_v_injected=self_attn_sty2_v_injected,
+                
                       injection_config=injection_config)
 
             

@@ -84,6 +84,11 @@ def main():
     unet_model = model.model.diffusion_model
     sampler = DDIMSampler(model)
     
+    for name, module in unet_model.named_modules():
+        if module.__class__.__name__ == "CrossAttention":
+            module.gen_pkl = True
+            print(f"Set gen_pkl=True for {name}")
+
     self_attn_output_block_indices = list(map(int, opt.attn_layer.split(',')))
     ddim_inversion_steps = opt.ddim_inv_steps
     save_feature_timesteps = ddim_steps = opt.save_feat_steps

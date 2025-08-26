@@ -1,4 +1,3 @@
-precomputed_feats/
 precomputed_feats_k/
 
 models/ldm/stable-diffusion-v1/model.ckpt

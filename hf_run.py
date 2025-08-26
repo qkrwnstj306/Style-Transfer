@@ -67,6 +67,54 @@ def feat_merge(opt, cnt_feats, sty_feats, start_step=0):
                 feat_maps[i][ori_key + '_cnt'] = cnt_feat[ori_key]
     return feat_maps
 
+## 2가지 style feature와 content feature를 받아서 feat_merge를 수행하는 함수
+def feat_merge_2sty(opt, cnt_feats, sty_feats_1, sty_feats_2, start_step=0):
+    feat_maps = [{
+        'config': {  
+            'gamma': opt.gamma,
+            'T': opt.T,
+            'timestep': i,
+            'cnt_k': None,
+            'sty_q': None,
+        }
+    } for i in range(50)]
+
+    for i in range(len(feat_maps)):
+        if i < (50 - start_step):
+            continue
+
+        cnt_feat = cnt_feats[i]
+        sty_feat_1 = sty_feats_1[i]
+        sty_feat_2 = sty_feats_2[i]
+        ori_keys = cnt_feat.keys()  # q,k,v 다 있음
+
+        for ori_key in ori_keys:
+            # === 기본 설정: content q, style1 k/v ===
+            if ori_key.endswith('q'):
+                feat_maps[i][ori_key] = cnt_feat[ori_key]
+            if ori_key.endswith('k') or ori_key.endswith('v'):
+                feat_maps[i][ori_key] = sty_feat_1[ori_key]
+
+            # === content 복사 ===
+            if ori_key.endswith('k'):
+                feat_maps[i][ori_key + '_cnt'] = cnt_feat[ori_key]
+            if ori_key.endswith('v'):
+                feat_maps[i][ori_key + '_cnt'] = cnt_feat[ori_key]
+
+            # === style1 복사 ===
+            if ori_key.endswith('q'):
+                feat_maps[i][ori_key + '_sty1'] = sty_feat_1[ori_key]
+
+            # === style2 복사 ===
+            if ori_key.endswith('q'):
+                feat_maps[i][ori_key + '_sty2'] = sty_feat_2[ori_key]
+            if ori_key.endswith('k'):
+                feat_maps[i][ori_key + '_sty2'] = sty_feat_2[ori_key]
+            if ori_key.endswith('v'):
+                feat_maps[i][ori_key + '_sty2'] = sty_feat_2[ori_key]
+
+    return feat_maps
+
 def load_img(path):
     image = Image.open(path).convert("RGB")
     x, y = image.size
@@ -117,7 +165,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--cnt', default = './data/cnt')
     parser.add_argument('--sty', default = './data/sty')
-    parser.add_argument('--mask', default='None', help='mask image (white=apply style, black=preserve content)')
+    parser.add_argument('--mask', default='None', help='mask image (white=apply style, black=preserve content)') # x
     parser.add_argument('--ddim_inv_steps', type=int, default=50, help='DDIM eta')
     parser.add_argument('--save_feat_steps', type=int, default=50, help='DDIM eta')
     parser.add_argument('--start_step', type=int, default=49, help='DDIM eta')

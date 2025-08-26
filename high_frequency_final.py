@@ -1,7 +1,7 @@
 import torch
 import types
 
-def high_freq_filter(h, radius_ratio=0.2):
+def high_freq_filter(h, radius_ratio=0.5):
     #tensor: (B, C, H, W) 형태의 feature map (복소수 변환 후 실수부 복원)
     #radius_ratio : 저주파 반경 비율, 이 반경 이내는 0(제거)으로 처리
 
@@ -43,7 +43,7 @@ def make_content_injection_schedule(ddim_timesteps, alpha=0.4):
     return ddim_timesteps[:int(alpha * T)]
 
 
-def patch_decoder_resblocks_h_and_cnt_hf(unet, schedule, residuals_all):
+def patch_decoder_resblocks_h_and_cnt_hf(unet, schedule, residuals_all, ratio=0.5):
     """
     ResBlock의 _forward를 덮어써서 고주파 주입
     mode: ['h_only', 'skip_only', 'both', 'none']
@@ -79,7 +79,7 @@ def patch_decoder_resblocks_h_and_cnt_hf(unet, schedule, residuals_all):
                             #skip_cnt = skip_cnt.to(out_stylized.device)
 
                             # 고주파 필터 적용
-                            h_cnt_hf = high_freq_filter(h_cnt)
+                            h_cnt_hf = high_freq_filter(h_cnt, radius_ratio=ratio)
                             #skip_cnt_hf = high_freq_filter(skip_cnt)
 
                             skip_stylized = self.out_skip

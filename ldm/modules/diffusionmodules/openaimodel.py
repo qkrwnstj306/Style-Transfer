@@ -88,6 +88,11 @@ class TimestepEmbedSequential(nn.Sequential, TimestepBlock):
                 self_attn_cnt_k_injected=None,
                 self_attn_sty_q_injected=None,
                 self_attn_cnt_v_injected=None,
+                ## 2개의 스타일 인젝션
+                self_attn_sty2_q_injected=None,
+                self_attn_sty2_k_injected=None,
+                self_attn_sty2_v_injected=None,
+
                 out_layers_injected=None,
                 injection_config=None):
         for layer in self:
@@ -105,6 +110,11 @@ class TimestepEmbedSequential(nn.Sequential, TimestepBlock):
                           self_attn_cnt_k_injected,
                           self_attn_sty_q_injected,
                           self_attn_cnt_v_injected,
+                          ## 2개의 스타일 인젝션
+                          self_attn_sty2_q_injected,
+                          self_attn_sty2_k_injected,
+                          self_attn_sty2_v_injected,
+
                           injection_config,)
             else:
                 x = layer(x)
@@ -798,8 +808,13 @@ class UNetModel(nn.Module):
 
         module_i = 0
         ## residual injection
-        residual_dict = {}  # 🔸추가: residual 저장용
+        residual_dict = {}  # 추가: residual 저장용
+        layer_index = 0
         for module in self.output_blocks:
+            for submodule in module.modules():
+                if hasattr(submodule, "layer_index"):
+                    submodule.layer_index = module_i  # 현재 모듈의 인덱스 전달
+            layer_index += 1
             self_attn_q_injected = None
             self_attn_k_injected = None
             self_attn_v_injected = None
@@ -807,6 +822,12 @@ class UNetModel(nn.Module):
             self_attn_cnt_k_injected= None
             self_attn_sty_q_injected = None
             self_attn_cnt_v_injected = None
+
+            ## 2개의 스타일 인젝션
+            self_attn_sty2_q_injected = None
+            self_attn_sty2_k_injected = None
+            self_attn_sty2_v_injected = None
+            
             out_layers_injected = None
             injection_config = None
             q_feature_key = f'output_block_{module_i}_self_attn_q'
@@ -815,6 +836,11 @@ class UNetModel(nn.Module):
             cnt_k_feature_key = f'output_block_{module_i}_self_attn_k_cnt'
             sty_q_feature_key = f'output_block_{module_i}_self_attn_q_sty'
             cnt_v_feature_key = f'output_block_{module_i}_self_attn_v_cnt'
+            ## 2개의 스타일 인젝션
+            sty2_q_feature_key = f'output_block_{module_i}_self_attn_q_sty2'
+            sty2_k_feature_key = f'output_block_{module_i}_self_attn_k_sty2'
+            sty2_v_feature_key = f'output_block_{module_i}_self_attn_v_sty2'
+            ## 여기에 out_layers_injected 추가
             out_layers_feature_key = f'output_block_{module_i}_out_layers'
             t_scale_key = f'output_block_{module_i}_self_attn_s'
             config_key = f'config'
@@ -840,6 +866,16 @@ class UNetModel(nn.Module):
             
             if injected_features is not None and cnt_v_feature_key in injected_features:
                 self_attn_cnt_v_injected = injected_features[cnt_v_feature_key]
+
+            ## 2개의 스타일 인젝션
+            if injected_features is not None and sty2_q_feature_key in injected_features:
+                self_attn_sty2_q_injected = injected_features[sty2_q_feature_key]
+            
+            if injected_features is not None and sty2_k_feature_key in injected_features:
+                self_attn_sty2_k_injected = injected_features[sty2_k_feature_key]
+
+            if injected_features is not None and sty2_v_feature_key in injected_features:
+                self_attn_sty2_v_injected = injected_features[sty2_v_feature_key]
                 
             if injected_features is not None:
                 injection_config = injected_features[config_key]
@@ -851,11 +887,11 @@ class UNetModel(nn.Module):
             h = th.cat([h, hs.pop()], dim=1)
             
             # (2) 여기에 residual 저장
-            if module_i in range(3,9):  # 3,4,5,6,7,8
-                residual_key = f"output_block_{module_i}_residual"
-                if self.save_residuals:  # save_residuals는 인자로 받아야 함 or 클래스 attr로 추가
-                    residual_dict[residual_key] = h.detach().cpu()
-                    print(f"[ResidualExtraction] Saved {residual_key} shape: {h.shape}")
+            # if module_i in range(3,9):  # 3,4,5,6,7,8
+            #     residual_key = f"output_block_{module_i}_residual"
+            #     if self.save_residuals:  # save_residuals는 인자로 받아야 함 or 클래스 attr로 추가
+            #         residual_dict[residual_key] = h.detach().cpu()
+            #         print(f"[ResidualExtraction] Saved {residual_key} shape: {h.shape}")
 
             h = module(h,
                        emb,
@@ -864,18 +900,24 @@ class UNetModel(nn.Module):
                        self_attn_k_injected=self_attn_k_injected,
                        self_attn_v_injected=self_attn_v_injected,
                        out_layers_injected=out_layers_injected,
+                       ## 여기도 마스크
                        self_attn_cnt_k_injected=self_attn_cnt_k_injected,
                        self_attn_sty_q_injected=self_attn_sty_q_injected,
                        self_attn_cnt_v_injected=self_attn_cnt_v_injected,
+                       ## 2개의 스타일 인젝션
+                       self_attn_sty2_q_injected=self_attn_sty2_q_injected,
+                       self_attn_sty2_k_injected=self_attn_sty2_k_injected,
+                       self_attn_sty2_v_injected=self_attn_sty2_v_injected,
+                       
                        injection_config=injection_config,)
             module_i += 1
 
-        if self.save_residuals and self.residual_save_path is not None:
-            import pickle, os
-            os.makedirs(os.path.dirname(self.residual_save_path), exist_ok=True)
-            with open(self.residual_save_path, 'wb') as f:
-                pickle.dump(residual_dict, f)
-            print(f"[ResidualExtraction] Saved all residuals to {self.residual_save_path}")
+        # if self.save_residuals and self.residual_save_path is not None:
+        #     import pickle, os
+        #     os.makedirs(os.path.dirname(self.residual_save_path), exist_ok=True)
+        #     with open(self.residual_save_path, 'wb') as f:
+        #         pickle.dump(residual_dict, f)
+        #     print(f"[ResidualExtraction] Saved all residuals to {self.residual_save_path}")
         
         h = h.type(x.dtype)
         if self.predict_codebook_ids:
