@@ -78,3 +78,5 @@ data_vis
 ```
 python run_ori.py --cnt data_vis/cnt --sty data_vis/sty --gamma 0.5 --T 1.5 --ratio 0.5
 ```
+
+Check `output_dk` dir!!!
