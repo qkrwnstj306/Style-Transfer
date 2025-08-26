@@ -13,7 +13,7 @@ conda activate StyleID
 
 ## Download StableDiffusion Weights
 
-Download <a href='https://huggingface.co/CompVis/stable-diffusion-v-1-4-original/tree/main'>Model weight (sd-v1-4.ckpt)</a> and put it in the `models/ldm/stable-diffusion-v1/model.ckpt`
+Download <a href='https://huggingface.co/CompVis/stable-diffusion-v-1-4-original/tree/main'>Model weight (sd-v1-4.ckpt)</a> and put it in the `models/ldm/stable-diffusion-v1/model.ckpt` **(rename: `sd-v1-4.ckpt` > `model.ckpt`)**
 
 ## Description of Folders
 
