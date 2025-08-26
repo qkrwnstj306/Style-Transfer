@@ -20,7 +20,7 @@ Download <a href='https://huggingface.co/CompVis/stable-diffusion-v-1-4-original
 - `data_styleid`: dataset of existing StyleID
 - `data_vis`: **datset for Our inference**
     - `/cnt`: content images and `mask.npy`
-    - '/sty': style images
+    - `/sty`: style images
 - `dataset_ours`: our dataset
 - `output_dk`: output dir
 - `precomputed_feats_k`: `feature map.pkl` after DDIM Inversion
