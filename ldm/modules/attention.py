@@ -290,27 +290,6 @@ class CrossAttention(nn.Module):
         sim = sim_reshaped.reshape(head_num, pixel_size, pixel_size)
         
         
-        ### 여기선 alpha가 더해진 어텐션 맵 자체를 저장
-        if isinstance(injection_config, dict) and target_t_list is not None:
-            t = injection_config.get('timestep')
-            
-            # self 객체에서 target_t(리스트)와 target_layer(정수)를 가져옴
-            current_layer_id = getattr(self, 'layer_id', None)
-            # 현재 timestep이 target_t 리스트에 있을 때만 저장.
-            if t in target_t_list:
-                save_dir = 'saved_sim'
-                os.makedirs(save_dir, exist_ok=True)
-                
-                # 파일명에 layer, timestep, 스타일, 콘텐츠 이름 포함
-                fn = f"layer{current_layer_id}_t{t+1}_{os.path.basename(self.sty_name)}_{os.path.basename(self.cnt_name)}_sim.pkl"
-                path = os.path.join(save_dir, fn)
-                
-                with open(path, 'wb') as f:
-                    pickle.dump(sim.detach().cpu(), f)
-                
-                print(f"[SimCapture] saved sim map -> {path}")
-        # ------------------- 추가/수정된 코드 종료 -------------------
-        
         ### z* 버전
         
         ##### delta 수정 버전.
@@ -428,12 +407,13 @@ class CrossAttention(nn.Module):
 
         ##################### 마스크 적용 시작 ######################
         if not self.gen_pkl:
-            mask_path = self.cnt_name.replace(".jpg", "_mask.npy")
+            base_name, _ = os.path.splitext(self.cnt_name)
+            mask_path = base_name + "_mask.npy"
+
             is_mask_exists = os.path.exists(mask_path)  # mask_path가 존재하는지 확인
             
             use_mask = (
-                self.sty_name is not None
-                and self.cnt_name is not None
+                self.cnt_name is not None
                 and not is_cross
                 and is_mask_exists
             )
@@ -441,7 +421,7 @@ class CrossAttention(nn.Module):
 
 
             if use_mask:
-                self.sty_name = os.path.basename(self.sty_name)
+                # self.sty_name = os.path.basename(self.sty_name)
                 if q_injected is not None and k_injected is not None:
                     # ## ver 1. Q^cs StyleID 그대로 사용
                     # q_cnt = copy.deepcopy(self.q)
@@ -462,41 +442,7 @@ class CrossAttention(nn.Module):
                         k=k_cnt,
                         num_heads=h,
                     )
-                    
 
-                    ### self.q 저장
-                    # 내가 지정한 layer·내가 지정한 timestep 에서만 q,k 저장
-                    # 1) Q/K 캡처용 플래그 + 유효한 dict일 때만 get() 호출
-                    if isinstance(injection_config, dict) and self.target_t_list is not None:
-                        t = injection_config.get('timestep')
-                        if t in self.target_t_list:
-                            # 1) raw q/k 뽑아오기
-                            raw_q = self.to_q(x).detach().cpu()         # (1, N, heads*d)
-                            raw_k = self.to_k(x).detach().cpu()  # (1, N, heads*d)
-
-                            # 2) (1, N, heads*d) → (1, N, heads, d) → (heads, N, d)
-                            B, N, C = raw_q.shape
-                            heads = self.heads
-                            d     = C // heads
-                            q     = raw_q.view(B, N, heads, d).permute(0,2,1,3).squeeze(0)  # (heads, N, d)
-                            k     = raw_k.view(B, N, heads, d).permute(0,2,1,3).squeeze(0)  # (heads, N, d)
-
-                            # 3) 원하는 키 이름
-                            q_key = f"output_block_{self.layer_id}_self_attn_q"
-                            k_key = f"output_block_{self.layer_id}_self_attn_k"
-
-                            # 4) 리스트-of-dict 포맷으로 패키징
-                            feat_list = [{ q_key: q, k_key: k }]
-
-                            # 5) 디스크에 저장
-                            save_dir = 'saved_qk'
-                            os.makedirs(save_dir, exist_ok=True)
-                            cnt_basename = os.path.basename(self.cnt_name)
-                            fn   = f"layer{self.layer_id}_t{t+1}_{self.sty_name}_{cnt_basename}_qk.pkl"
-                            path = os.path.join(save_dir, fn)
-                            with open(path, 'wb') as f:
-                                pickle.dump(feat_list, f)
-                            print(f"[QKCapture] saved q,k → {path}")
                             # ───────────────────────────────────────────────────────────
                     
                     
