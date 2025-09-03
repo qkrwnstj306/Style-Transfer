@@ -1,5 +1,6 @@
 import torch
 import types
+import numpy as np
 
 def high_freq_filter(h, radius_ratio=0.5):
     #tensor: (B, C, H, W) 형태의 feature map (복소수 변환 후 실수부 복원)
@@ -49,7 +50,6 @@ def patch_decoder_resblocks_h_and_cnt_hf(unet, schedule, residuals_all, ratio=0.
     mode: ['h_only', 'skip_only', 'both', 'none']
     where: ['none', 'add']
     """
-
     for block_id in range(6, 12):
         if block_id >= len(unet.output_blocks):
             break
@@ -58,7 +58,9 @@ def patch_decoder_resblocks_h_and_cnt_hf(unet, schedule, residuals_all, ratio=0.
             if module.__class__.__name__.endswith("ResBlock"):
                 module.block_id = block_id
                 orig_forward = module._forward
-
+                def get_index(schedule, t):
+                    return np.where(schedule == t)[0][0]
+                
                 def wrapped_forward(self, x, emb, out_layers_injected=None, _orig=orig_forward):
                     out_stylized = _orig(x, emb, out_layers_injected)
                     t = getattr(self, "ri_timestep", None)
@@ -67,8 +69,9 @@ def patch_decoder_resblocks_h_and_cnt_hf(unet, schedule, residuals_all, ratio=0.
                     #key_all = f"output_block_{self.block_id}_residual"
                     out_res = out_stylized
 
-                    if t in schedule and t in residuals_all:
-                        h_cnt = residuals_all[t].get(key_h, None)
+                    if t in schedule: # t = 1 -> 0, t = 9 -> 1
+                        index = get_index(schedule, t)
+                        h_cnt = residuals_all[index].get(key_h, None)
                         #skip_cnt = residuals_all[t].get(key_skip, None)
 
                         #if h_cnt is not None and skip_cnt is not None:

@@ -22,6 +22,7 @@ from high_frequency_final import patch_decoder_resblocks_h_and_cnt_hf, make_cont
 
 from dataset import TripleImageDataset
 
+# 전역 변수 제거 - 함수 내부에서 관리하도록 변경
 feat_maps = []
 
 def save_img_from_sample(model, samples_ddim, fname):
@@ -134,25 +135,54 @@ def main():
     idx_time_dict = {t:i for i,t in enumerate(time_range)}
     time_idx_dict = {i:t for i,t in enumerate(time_range)}
 
-    global feat_maps
-    feat_maps = [{'config': {'gamma':opt.gamma,'T':opt.T,'cnt_k': None}} for _ in range(50)]
-
-    def save_feature_map(fmap, fname, t):
-        global feat_maps
-        cur_idx = idx_time_dict[t]
-        feat_maps[cur_idx][fname] = fmap
-
-    def ddim_sampler_callback(pred_x0, xt, i):
-        save_feature_map(xt, 'z_enc', i)
-
-    start_step = opt.start_step
     uc = model.get_learned_conditioning([""])
     shape = [opt.C, opt.H // opt.f, opt.W // opt.f]
     
     dataset = TripleImageDataset(opt.data_root, "dataset.txt", image_size=512, device=device)
     unet_model = model.model.diffusion_model
     begin = time.time()
+    
+    ## residual injection
+    # 매 DDIM 스텝마다 timestep을 hook 모듈에 설정하는 콜백
+    def residual_injection_callback(step_idx):
+        t = sampler.ddim_timesteps[step_idx]
+        # residual_high 저장 경로에서 불러오기
+        # 예: precomputed_feats/.../{image_name}_residuals_all.pkl
+        # 현재 content 이미지의 high-freq residual 불러오기
+
+        for block_id in range(6, 12):
+            if block_id >= len(unet_model.output_blocks):
+                break
+
+            for module in reversed(unet_model.output_blocks[block_id]):
+                if module.__class__.__name__.endswith("ResBlock"):
+                    module.ri_timestep = int(t)
+                    break
+                # EMA 모델도 동일하게
+
+        if hasattr(model, "model_ema"):
+            ema_unet = model.model_ema.diffusion_model
+            for block_id in range(6, 12):
+                if block_id >= len(ema_unet.output_blocks):
+                    break
+                for module in reversed(ema_unet.output_blocks[block_id]):
+                    if module.__class__.__name__.endswith("ResBlock"):
+                        module.ri_timestep = int(t)
+                        break
+    
     for idx in range(len(dataset)):
+        print(f"Processing image {idx+1}/{len(dataset)}")
+        
+        # 각 반복마다 feat_maps 초기화
+        feat_maps_current = [{'config': {'gamma':opt.gamma,'T':opt.T,'cnt_k': None}} for _ in range(50)]
+
+        def save_feature_map(fmap, fname, t):
+            cur_idx = idx_time_dict[t]
+            feat_maps_current[cur_idx][fname] = fmap
+
+        def ddim_sampler_callback(pred_x0, xt, i):
+            save_feature_map(xt, 'z_enc', i)
+
         cnt_img, char_img, back_img, cnt_path, char_path, back_path = dataset[idx]
 
         ## 마스크 적용
@@ -164,6 +194,10 @@ def main():
         char_base = os.path.splitext(os.path.basename(char_path))[0]
         back_base = os.path.splitext(os.path.basename(back_path))[0]
 
+        # 변수 초기화
+        char_z_enc, back_z_enc, cnt_z_enc = None, None, None
+        char_feat, back_feat, cnt_feat = None, None, None
+
         # Style1 (char)
         char_feat_name = os.path.join(opt.precomputed, f"{char_base}_sty.pkl")
         if os.path.isfile(char_feat_name):
@@ -174,14 +208,16 @@ def main():
             init_char = model.get_first_stage_encoding(model.encode_first_stage(char_img))
             char_z_enc, _ = sampler.encode_ddim(
                 init_char.clone(), num_steps=opt.ddim_inv_steps, unconditional_conditioning=uc,
-                end_step=time_idx_dict[opt.ddim_inv_steps-1-start_step],
+                end_step=time_idx_dict[opt.ddim_inv_steps-1-opt.start_step],
                 callback_ddim_timesteps=opt.save_feat_steps,
                 img_callback=ddim_sampler_callback
             )
-            char_feat = copy.deepcopy(feat_maps)
-            char_z_enc = feat_maps[0]['z_enc']
+            char_feat = copy.deepcopy(feat_maps_current)
+            char_z_enc = feat_maps_current[0]['z_enc']
             with open(char_feat_name, 'wb') as h:
                 pickle.dump(char_feat, h)
+            # 중간 변수 정리
+            del init_char
 
         # Style2 (back)
         back_feat_name = os.path.join(opt.precomputed, f"{back_base}_sty.pkl")
@@ -190,37 +226,55 @@ def main():
                 back_feat = pickle.load(h)
                 back_z_enc = torch.clone(back_feat[0]['z_enc'])
         else:
+            # feat_maps_current 재초기화
+            feat_maps_current = [{'config': {'gamma':opt.gamma,'T':opt.T,'cnt_k': None}} for _ in range(50)]
             init_back = model.get_first_stage_encoding(model.encode_first_stage(back_img))
             back_z_enc, _ = sampler.encode_ddim(
                 init_back.clone(), num_steps=opt.ddim_inv_steps, unconditional_conditioning=uc,
-                end_step=time_idx_dict[opt.ddim_inv_steps-1-start_step],
+                end_step=time_idx_dict[opt.ddim_inv_steps-1-opt.start_step],
                 callback_ddim_timesteps=opt.save_feat_steps,
                 img_callback=ddim_sampler_callback
             )
-            back_feat = copy.deepcopy(feat_maps)
-            back_z_enc = feat_maps[0]['z_enc']
+            back_feat = copy.deepcopy(feat_maps_current)
+            back_z_enc = feat_maps_current[0]['z_enc']
             with open(back_feat_name, 'wb') as h:
                 pickle.dump(back_feat, h)
+            # 중간 변수 정리
+            del init_back
 
         # Content (cnt)
         cnt_feat_name = os.path.join(opt.precomputed, f"{cnt_base}_cnt.pkl")
+
         if os.path.isfile(cnt_feat_name):
             with open(cnt_feat_name, 'rb') as h:
                 cnt_feat = pickle.load(h)
                 cnt_z_enc = torch.clone(cnt_feat[0]['z_enc'])
         else:
+            # feat_maps_current 재초기화
+            feat_maps_current = [{'config': {'gamma':opt.gamma,'T':opt.T,'cnt_k': None}} for _ in range(50)]
             init_cnt = model.get_first_stage_encoding(model.encode_first_stage(cnt_img))
             cnt_z_enc, _ = sampler.encode_ddim(
                 init_cnt.clone(), num_steps=opt.ddim_inv_steps, unconditional_conditioning=uc,
-                end_step=time_idx_dict[opt.ddim_inv_steps-1-start_step],
+                end_step=time_idx_dict[opt.ddim_inv_steps-1-opt.start_step],
                 callback_ddim_timesteps=opt.save_feat_steps,
                 img_callback=ddim_sampler_callback
             )
-            cnt_feat = copy.deepcopy(feat_maps)
-            cnt_z_enc = feat_maps[0]['z_enc']
+            cnt_feat = copy.deepcopy(feat_maps_current)
+            cnt_z_enc = feat_maps_current[0]['z_enc']
             with open(cnt_feat_name, 'wb') as h:
                 pickle.dump(cnt_feat, h)
+            # 중간 변수 정리
+            del init_cnt
 
+        # High-frequency enhancement
+        schedule = make_content_injection_schedule(sampler.ddim_timesteps, alpha=0.4)
+        patch_decoder_resblocks_h_and_cnt_hf(unet_model, 
+                                                schedule, 
+                                                cnt_feat, ratio=opt.ratio)
+        if hasattr(model, "model_ema"):
+            patch_decoder_resblocks_h_and_cnt_hf(model.model_ema.diffusion_model, 
+                                                    schedule, 
+                                                    cnt_feat, ratio=opt.ratio)
         # AdaIN blending
         if opt.without_init_adain:
             adain_z_enc = cnt_z_enc
@@ -230,20 +284,51 @@ def main():
             mask = F.interpolate(mask, size=(cnt_z_enc.shape[2], cnt_z_enc.shape[3]), mode="bilinear", align_corners=False)
             mask = mask.expand(-1, cnt_z_enc.shape[1], -1, -1)
             adain_z_enc = mask * adain(cnt_z_enc, char_z_enc) + (1-mask) * adain(cnt_z_enc, back_z_enc)
+            # mask 정리
+            del mask
 
         # Feature merge
-        feat_maps = feat_merge_2sty(opt, cnt_feat, char_feat, back_feat, start_step=start_step)
+        merged_feat_maps = feat_merge_2sty(opt, cnt_feat, char_feat, back_feat, start_step=opt.start_step)
 
         # Inference
         samples_ddim, _ = sampler.sample(
-            S=opt.save_feat_steps, batch_size=1, shape=shape, verbose=False,
-            unconditional_conditioning=uc, eta=opt.ddim_eta, x_T=adain_z_enc,
-            injected_features=feat_maps, start_step=start_step
+            S=opt.save_feat_steps, 
+            batch_size=1, 
+            shape=shape, 
+            verbose=False,
+            unconditional_conditioning=uc, 
+            eta=opt.ddim_eta, 
+            x_T=adain_z_enc,
+            injected_features=merged_feat_maps, 
+            start_step=opt.start_step,
+            # ## 마스크 적용
+            # # ## residual injection
+            callback=residual_injection_callback,
         )
 
         # 저장 파일명 = cnt_char_back.png
         result_name = f"{cnt_base}_{char_base}_{back_base}.png"
         save_img_from_sample(model, samples_ddim, os.path.join(opt.output_path, result_name))
+
+        # 명시적 메모리 정리
+        del samples_ddim
+        if char_z_enc is not None:
+            del char_z_enc
+        if back_z_enc is not None:
+            del back_z_enc
+        if cnt_z_enc is not None:
+            del cnt_z_enc
+        if adain_z_enc is not None:
+            del adain_z_enc
+        del char_feat, back_feat, cnt_feat
+        del merged_feat_maps
+        del feat_maps_current
+
+        # GPU 캐시 정리
+        torch.cuda.empty_cache()
+        
+        print(f"Completed image {idx+1}/{len(dataset)}")
+            
 
     print(f"Total end: {time.time() - begin}")
 

@@ -156,24 +156,26 @@ def main():
 
             for module in reversed(unet_model.output_blocks[block_id]):
                 if module.__class__.__name__.endswith("ResBlock"):
-                    if hasattr(module, 'out_skip') and module.out_skip is not None:
-                        skip = module.out_skip.detach().cpu()
-                        #skip_hf = high_pass_filter(skip, radius=6)
-                        key_skip = f"output_block_{block_id}_cnt_skip"
-                        residuals_all[t_int][key_skip] = skip
-                        print(f"[Callback] t={t_int}, saved {key_skip}")
+                    # if hasattr(module, 'out_skip') and module.out_skip is not None:
+                    #     skip = module.out_skip.detach().cpu()
+                    #     #skip_hf = high_pass_filter(skip, radius=6)
+                    #     key_skip = f"output_block_{block_id}_cnt_skip"
+                    #     residuals_all[t_int][key_skip] = skip
+                    #     print(f"[Callback] t={t_int}, saved {key_skip}")
 
                     if hasattr(module, 'out_h') and module.out_h is not None:
                         h = module.out_h.detach().cpu()
                         #h_hf = high_pass_filter(h, radius=6)
                         key_h = f"output_block_{block_id}_cnt_h"
-                        residuals_all[t_int][key_h] = h
+                        save_feature_map(h, f"{key_h}", t_int)
+                        #feat_maps[t_int][f"{key_h}"] = h
+                        # residuals_all[t_int][key_h] = h
                         print(f"[Callback] t={t_int}, saved {key_h}")
 
-                    if hasattr(module, 'out_merged') and module.out_merged is not None:
-                        key_full = f"output_block_{block_id}_residual"
-                        residuals_all[t_int][key_full] = module.out_merged.detach().cpu()
-                        print(f"[Callback] t={t_int}, saved {key_full}")
+                    # if hasattr(module, 'out_merged') and module.out_merged is not None:
+                    #     key_full = f"output_block_{block_id}_residual"
+                    #     residuals_all[t_int][key_full] = module.out_merged.detach().cpu()
+                    #     print(f"[Callback] t={t_int}, saved {key_full}")
 
                     break  # 마지막 ResBlock만 처리
 

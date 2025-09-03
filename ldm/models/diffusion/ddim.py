@@ -229,7 +229,8 @@ class DDIMSampler(object):
             
             img, pred_x0 = outs
             if step in callback_ddim_timesteps_list:
-                if callback: callback(i)
+                if callback: 
+                    callback(i)
                 if img_callback: img_callback(pred_x0, img, step)
 
             if index % log_every_t == 0 or index == total_steps - 1:
