@@ -199,9 +199,10 @@ class DDIMSampler(object):
         # import builtins
         for i, step in enumerate(iterator):
             # builtins.global_step_idx = i
+            # breakpoint()
             index = total_steps - i - 1
-            if index >= start_step:
-                continue
+            # if index >= start_step: ## 왜 time step 981을 건너뛰는지
+            #     continue
             ts = torch.full((b,), step, device=device, dtype=torch.long)
 
             if mask is not None:

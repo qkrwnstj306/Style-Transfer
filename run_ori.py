@@ -46,8 +46,8 @@ def feat_merge_2sty(opt, cnt_feats, sty_feats_1, sty_feats_2, start_step=0):
     } for i in range(50)]
 
     for i in range(len(feat_maps)):
-        if i < (50 - start_step):
-            continue
+        # if i < (50 - start_step): ## 왜 time step 981을 건너뛰는지 
+        #     continue
 
         cnt_feat = cnt_feats[i]
         sty_feat_1 = sty_feats_1[i]

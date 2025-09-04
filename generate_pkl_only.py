@@ -99,6 +99,7 @@ def main():
 
     sampler.make_schedule(ddim_num_steps=ddim_steps, ddim_eta=opt.ddim_eta, verbose=False) 
     time_range = np.flip(sampler.ddim_timesteps)
+
     idx_time_dict = {}
     time_idx_dict = {}
     for i, t in enumerate(time_range):
