@@ -34,7 +34,7 @@ def make_content_injection_schedule(ddim_timesteps, alpha=0.4):
 
 
 def patch_decoder_resblocks_h_and_cnt_hf(unet, schedule, residuals_all, ratio=0.5):
-
+    
     def wrapped_forward(self, x, emb, out_layers_injected=None, *, orig_forward, schedule, residuals_all, ratio):
         out_stylized = orig_forward(x, emb, out_layers_injected)
         t = getattr(self, "ri_timestep", None)
