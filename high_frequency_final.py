@@ -34,9 +34,34 @@ def make_content_injection_schedule(ddim_timesteps, alpha=0.4):
 
 
 def patch_decoder_resblocks_h_and_cnt_hf(unet, schedule, residuals_all, ratio=0.5):
-    
+    def move_feat_maps_to_device(feat_maps, device):
+        for i, f in enumerate(feat_maps):
+            if isinstance(f, dict):
+                for k, v in f.items():
+                    if torch.is_tensor(v):
+                        f[k] = v.to(device)
+            elif torch.is_tensor(f):
+                feat_maps[i] = f.to(device)
+        return feat_maps
+    def move_feat_maps_to_cpu(feat_maps):
+        for i, f in enumerate(feat_maps):
+            if isinstance(f, dict):
+                for k, v in f.items():
+                    if torch.is_tensor(v):
+                        f[k] = v.cpu()
+            elif torch.is_tensor(f):
+                feat_maps[i] = f.cpu()
+        return feat_maps
+
+    @torch.no_grad()
     def wrapped_forward(self, x, emb, out_layers_injected=None, *, orig_forward, schedule, residuals_all, ratio):
+        
+        if out_layers_injected is not None:
+            move_feat_maps_to_device(out_layers_injected, x.device)
         out_stylized = orig_forward(x, emb, out_layers_injected)
+        if out_layers_injected is not None: 
+            move_feat_maps_to_cpu(out_layers_injected)
+        
         t = getattr(self, "ri_timestep", None)
         key_h = f"output_block_{self.block_id}_cnt_h"
 
@@ -47,10 +72,10 @@ def patch_decoder_resblocks_h_and_cnt_hf(unet, schedule, residuals_all, ratio=0.
             h_cnt = h_cnt.to(out_stylized.device)
 
             if h_cnt is not None:
-                print(f"[DEBUG] h_cnt type at t={t}, key={key_h}:", type(h_cnt))
+                #print(f"[DEBUG] h_cnt type at t={t}, key={key_h}:", type(h_cnt))
                 h_cnt_hf = high_freq_filter(h_cnt, radius_ratio=ratio)
                 out_res = self.out_skip + self.out_h + h_cnt_hf
-
+            del h_cnt, h_cnt_hf
         return out_res
 
     for block_id in range(6, 12):

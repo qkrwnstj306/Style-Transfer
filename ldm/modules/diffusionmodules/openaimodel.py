@@ -118,7 +118,7 @@ class TimestepEmbedSequential(nn.Sequential, TimestepBlock):
                           injection_config,)
             else:
                 x = layer(x)
-        self.stored_output = x
+        #self.stored_output = x
         return x
 
 
@@ -756,7 +756,15 @@ class UNetModel(nn.Module):
             conv_nd(dims, model_channels, n_embed, 1),
             #nn.LogSoftmax(dim=1)  # change to cross_entropy and produce non-normalized logits
         )
-
+    def move_feat_maps_to_device(self, feat_maps, device):
+        for i, f in enumerate(feat_maps):
+            if isinstance(f, dict):
+                for k, v in f.items():
+                    if th.is_tensor(v):
+                        f[k] = v.to(device)
+            elif th.is_tensor(f):
+                feat_maps[i] = f.to(device)
+        return feat_maps
     def convert_to_fp16(self):
         """
         Convert the torso of the model to float16.
@@ -808,7 +816,7 @@ class UNetModel(nn.Module):
 
         module_i = 0
         ## residual injection
-        residual_dict = {}  # 추가: residual 저장용
+        #residual_dict = {}  # 추가: residual 저장용
         layer_index = 0
         for module in self.output_blocks:
             for submodule in module.modules():
@@ -842,45 +850,46 @@ class UNetModel(nn.Module):
             sty2_v_feature_key = f'output_block_{module_i}_self_attn_v_sty2'
             ## 여기에 out_layers_injected 추가
             out_layers_feature_key = f'output_block_{module_i}_out_layers'
-            t_scale_key = f'output_block_{module_i}_self_attn_s'
+            t_scale_key = f'output_block_{module_i}_self_attn_s' # Tau
             config_key = f'config'
 
             if injected_features is not None and q_feature_key in injected_features:
-                self_attn_q_injected = injected_features[q_feature_key]
+                self_attn_q_injected = injected_features[q_feature_key].to(h.device)
 
             if injected_features is not None and k_feature_key in injected_features:
-                self_attn_k_injected = injected_features[k_feature_key]
+                self_attn_k_injected = injected_features[k_feature_key].to(h.device)
 
             if injected_features is not None and v_feature_key in injected_features:
-                self_attn_v_injected = injected_features[v_feature_key]
+                self_attn_v_injected = injected_features[v_feature_key].to(h.device)
 
             if injected_features is not None and out_layers_feature_key in injected_features:
-                out_layers_injected = injected_features[out_layers_feature_key]
+                out_layers_injected = injected_features[out_layers_feature_key].to(h.device)
 
             ## 마스크 적용
             if injected_features is not None and cnt_k_feature_key in injected_features:
-                self_attn_cnt_k_injected = injected_features[cnt_k_feature_key]
+                self_attn_cnt_k_injected = injected_features[cnt_k_feature_key].to(h.device)
             
             if injected_features is not None and sty_q_feature_key in injected_features:
-                self_attn_sty_q_injected = injected_features[sty_q_feature_key]
+                self_attn_sty_q_injected = injected_features[sty_q_feature_key].to(h.device)
             
             if injected_features is not None and cnt_v_feature_key in injected_features:
-                self_attn_cnt_v_injected = injected_features[cnt_v_feature_key]
+                self_attn_cnt_v_injected = injected_features[cnt_v_feature_key].to(h.device)
 
             ## 2개의 스타일 인젝션
             if injected_features is not None and sty2_q_feature_key in injected_features:
-                self_attn_sty2_q_injected = injected_features[sty2_q_feature_key]
+                self_attn_sty2_q_injected = injected_features[sty2_q_feature_key].to(h.device)
             
             if injected_features is not None and sty2_k_feature_key in injected_features:
-                self_attn_sty2_k_injected = injected_features[sty2_k_feature_key]
+                self_attn_sty2_k_injected = injected_features[sty2_k_feature_key].to(h.device)
 
             if injected_features is not None and sty2_v_feature_key in injected_features:
-                self_attn_sty2_v_injected = injected_features[sty2_v_feature_key]
+                self_attn_sty2_v_injected = injected_features[sty2_v_feature_key].to(h.device)
                 
             if injected_features is not None:
                 injection_config = injected_features[config_key]
+                self.move_feat_maps_to_device(injection_config, h.device)
                 if t_scale_key in injected_features:
-                    injection_config['T'] = injected_features[t_scale_key]
+                    injection_config['T'] = injected_features[t_scale_key].to(h.device)
                     
                 
 

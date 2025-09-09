@@ -179,7 +179,6 @@ class DDIMSampler(object):
             subset_end = int(min(timesteps / self.ddim_timesteps.shape[0], 1) * self.ddim_timesteps.shape[0]) - 1
             timesteps = self.ddim_timesteps[:subset_end]
 
-        #intermediates = {'x_inter': [img], 'pred_x0': [img]}
         intermediates = {}
         time_range = reversed(range(0,timesteps)) if ddim_use_original_steps else np.flip(timesteps)
         total_steps = timesteps if ddim_use_original_steps else timesteps.shape[0]
@@ -192,30 +191,17 @@ class DDIMSampler(object):
 
         negative_prompt_alpha_schedule = self.make_negative_prompt_schedule(negative_prompt_schedule, negative_prompt_alpha, total_steps)
         style_loss = None
-        # # 07/02 cross attention hook 등록
-        # if hasattr(self.model.model.diffusion_model, 'attn_stats_per_step'):
-        #     self.model.model.diffusion_model.attn_stats_per_step = []
-        # 07/03 builtins로 global step index 등록
-        # builtins는 전역 네임스페이스로, 여기서 global_step_idx
-        # import builtins
+
         for i, step in enumerate(iterator):
-            # builtins.global_step_idx = i
-            # breakpoint()
             index = total_steps - i - 1
             # if index >= start_step: ## 왜 time step 981을 건너뛰는지
             #     continue
             ts = torch.full((b,), step, device=device, dtype=torch.long)
 
-            if mask is not None:
-                assert x0 is not None
-                img_orig = self.model.q_sample(x0, ts)
-                img = img_orig * mask + (1. - mask) * img
-
             injected_features_i = injected_features[i]\
                 if (injected_features is not None and len(injected_features) > 0) else None
             negative_prompt_alpha_i = negative_prompt_alpha_schedule[i]
-            # #07/02 cross attention hook 등록
-            # self.model.model.diffusion_model.attn_stats_per_step.append([])
+
             outs = self.p_sample_ddim(img, cond, ts, index=index, use_original_steps=ddim_use_original_steps,
                                       negative_conditioning=negative_conditioning,
                                       quantize_denoised=quantize_denoised, temperature=temperature,
@@ -234,12 +220,6 @@ class DDIMSampler(object):
                 if callback: 
                     callback(i)
                 if img_callback: img_callback(pred_x0, img, step)
-
-            # if index % log_every_t == 0 or index == total_steps - 1:
-            #     intermediates['x_inter'].append(img)
-            #     intermediates['pred_x0'].append(pred_x0)
-            # print(step)
-
         return img, intermediates
 
     @torch.no_grad()

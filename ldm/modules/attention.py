@@ -1,6 +1,4 @@
 
-## 백업용
-
 from inspect import isfunction
 import math
 import torch
@@ -104,60 +102,6 @@ class LinearAttention(nn.Module):
         out = rearrange(out, 'b heads c (h w) -> b (heads c) h w', heads=self.heads, h=h, w=w)
         return self.to_out(out)
 
-
-# class SpatialSelfAttention(nn.Module):
-#     def __init__(self, in_channels):
-#         super().__init__()
-#         self.in_channels = in_channels
-
-#         self.norm = Normalize(in_channels)
-#         self.q = torch.nn.Conv2d(in_channels,
-#                                  in_channels,
-#                                  kernel_size=1,
-#                                  stride=1,
-#                                  padding=0)
-#         self.k = torch.nn.Conv2d(in_channels,
-#                                  in_channels,
-#                                  kernel_size=1,
-#                                  stride=1,
-#                                  padding=0)
-#         self.v = torch.nn.Conv2d(in_channels,
-#                                  in_channels,
-#                                  kernel_size=1,
-#                                  stride=1,
-#                                  padding=0)
-#         self.proj_out = torch.nn.Conv2d(in_channels,
-#                                         in_channels,
-#                                         kernel_size=1,
-#                                         stride=1,
-#                                         padding=0)
-
-#     def forward(self, x):
-#         h_ = x
-#         h_ = self.norm(h_)
-#         q = self.q(h_)
-#         k = self.k(h_)
-#         v = self.v(h_)
-
-#         # compute attention
-#         b,c,h,w = q.shape
-#         q = rearrange(q, 'b c h w -> b (h w) c')
-#         k = rearrange(k, 'b c h w -> b c (h w)')
-#         w_ = torch.einsum('bij,bjk->bik', q, k)
-
-#         w_ = w_ * (int(c)**(-0.5))
-#         w_ = torch.nn.functional.softmax(w_, dim=2)
-
-#         # attend to values
-#         v = rearrange(v, 'b c h w -> b c (h w)')
-#         w_ = rearrange(w_, 'b i j -> b j i')
-#         h_ = torch.einsum('bij,bjk->bik', v, w_)
-#         h_ = rearrange(h_, 'b c (h w) -> b c h w', h=h)
-#         h_ = self.proj_out(h_)
-
-#         return x+h_
-
-
 class CrossAttention(nn.Module):
     def __init__(self, query_dim, context_dim=None, heads=8, dim_head=64, dropout=0.):
         super().__init__()
@@ -173,8 +117,6 @@ class CrossAttention(nn.Module):
         self.to_k = nn.Linear(context_dim, inner_dim, bias=False)
         self.to_v = nn.Linear(context_dim, inner_dim, bias=False)
         
-        
-        
         self.to_out = nn.Sequential(
             nn.Linear(inner_dim, query_dim),
             nn.Dropout(dropout)
@@ -184,7 +126,7 @@ class CrossAttention(nn.Module):
         self.q = None
         self.k = None
         self.v = None
-        self.qk_sim = None
+        #self.qk_sim = None
         
         ## generated pkl
         self.gen_pkl = False
@@ -196,7 +138,8 @@ class CrossAttention(nn.Module):
         ## q, k, sim 저장용
         self.target_t_list = None
         self.layer_id = None
-    
+
+        self.mask_cache = {}
     
     def get_batch_sim(self, q, k, num_heads, **kwargs):
         
@@ -242,45 +185,36 @@ class CrossAttention(nn.Module):
         start = 0.5
         end = -0.5
         length = w
+        
+        
+        # mask = torch.tensor(np.load(mask_path), dtype=torch.float32).cuda()
+        # mask[mask < 0.5] = -1.0
+        # mask[mask > 0.5] = 1.0
+        # mask = mask * ch #mask 영역별로 다르게 주기
+        # mask = mask.unsqueeze(0).unsqueeze(0)
+        # ### zero_star에서 사용한 방식
+        # mask = F.interpolate(mask, size=(
+        #     h, w), mode='bilinear', align_corners=False)
+        # mask = mask.reshape(1, h, w, 1).to(sim.device)  # (1, h, w, 1)
+        # 마스크 캐싱 - 경로를 키로 사용
 
-
-        # # if mask_path is not None and sty_name == "c_style.jpg":
-        # #     mask = torch.tensor(np.load(mask_path), dtype=torch.float32).cuda()
-        # #     mask[mask < 0.5] = -1.0
-        # #     mask[mask > 0.5] = 1.0
-        # #     mask *= -1.0
+        mask_key = f"{mask_path}_{h}_{w}_{ch}"
         
-        # # # # 수정본, 배경에 마스크 적용
-        # # elif mask_path is not None and sty_name == "b_style.jpg":
-        # #     mask = torch.tensor(np.load(mask_path), dtype=torch.float32).cuda()
-        # #     mask = 1.0 - mask   # 배경용 반전
-        # #     mask[mask < 0.5] = -1.0
-        # #     mask[mask > 0.5] = 1.0
-        # #     mask *= -1.0
+        if mask_key not in self.mask_cache:
+            # 처음 로드할 때만 GPU로 이동
+            mask = torch.tensor(np.load(mask_path), dtype=torch.float32).cuda()
+            mask[mask < 0.5] = -1.0
+            mask[mask > 0.5] = 1.0
+            mask = mask * ch
+            mask = mask.unsqueeze(0).unsqueeze(0)
+            mask = F.interpolate(mask, size=(h, w), mode='bilinear', align_corners=False)
+            mask = mask.reshape(1, h, w, 1).to(sim.device)
             
-            
-        # # else:
-        # #     print("ERROR: mask npy not found!!!")
-        # #     mask = torch.tensor([[1., 1., 1., 1.],
-        # #                         [1., -1., -1., 1.],
-        # #                         [1., -1., -1., 1.],
-        # #                         [-1., -1., -1., -1.]], dtype=torch.float32).cuda()
+            # 캐시에 저장
+            self.mask_cache[mask_key] = mask
         
-        
-        mask = torch.tensor(np.load(mask_path), dtype=torch.float32).cuda()
-        mask[mask < 0.5] = -1.0
-        mask[mask > 0.5] = 1.0
-        mask = mask * ch #mask 영역별로 다르게 주기
-        
-    
-        mask = mask.unsqueeze(0).unsqueeze(0)
-        
-        
-        
-        ### zero_star에서 사용한 방식
-        mask = F.interpolate(mask, size=(
-            h, w), mode='bilinear', align_corners=False)
-        mask = mask.reshape(1, h, w, 1).to(sim.device)  # (1, h, w, 1)
+        # 캐시된 마스크 사용
+        mask = self.mask_cache[mask_key]
         gradual_vanished_array = mask.reshape(1, h, w, 1).to(sim.device)
         delta = min_cc_sim_reshaped - max_sim_reshaped
         gradual_vanished_mask = (delta)[:, :, :, :] * gradual_vanished_array
@@ -288,43 +222,6 @@ class CrossAttention(nn.Module):
         sim_reshaped[:, :length, :, :] += gradual_vanished_mask
         
         sim = sim_reshaped.reshape(head_num, pixel_size, pixel_size)
-        
-        
-        ### z* 버전
-        
-        ##### delta 수정 버전.
-        # mask = torch.tensor(np.load(mask_path), dtype=torch.float32).cuda()
-        # # mask[mask < 0.5] = -1.0
-        # # mask[mask > 0.5] = 1.0
-        # # mask *= -1.0
-        # diff_mask = mask
-        # diff_mask[diff_mask < 0.5] = -1.0
-        # diff_mask[diff_mask > 0.5] = 1.0
-    
-        # mask = mask.unsqueeze(0).unsqueeze(0)
-        # diff_mask = diff_mask.unsqueeze(0).unsqueeze(0)
-        
-        # mask = F.interpolate(mask, size=(
-        #     h, w), mode='bilinear', align_corners=False)
-        # diff_mask = F.interpolate(diff_mask, size=(
-        #     h, w), mode='bilinear', align_corners=False)
-        # mask = mask.reshape(1, h, w, 1).to(sim.device)  # (1, h, w, 1)
-        # diff_mask = diff_mask.reshape(1, h, w, 1).to(sim.device)
-        
-        # masked_cc_sim_reshaped = cc_sim_reshaped * mask  # (h, w, pixel_size)
-
-        # masked_cc_sim_mu = masked_cc_sim_reshaped.mean(dim=(1,2,3), keepdim=True)  # (H, h, w, 1)
-        # max_sim_reshaped_mu = max_sim_reshaped.mean(dim=(1,2,3), keepdim=True)  # (H, h, w, 1)
-        
-        # diff = (masked_cc_sim_mu - max_sim_reshaped_mu).abs()  # (h, w, 1)
-
-        
-        
-        # gradual_vanished_mask = diff[:, :, :, :]  * diff_mask # (h, w, 1)
-        # sim_reshaped[:, :length, :, :] += gradual_vanished_mask
-        # sim = sim_reshaped.reshape(head_num, pixel_size, pixel_size)
-        ##### delta 수정 버전.
-        
         
         return sim
     
@@ -430,10 +327,6 @@ class CrossAttention(nn.Module):
                     k_cnt = torch.cat([cnt_k_injected]*b, dim=0)
                     v_cnt = torch.cat([cnt_v_injected]*b, dim=0)
 
-                    # k_cnt = torch.cat([cnt_k_injected]*b, dim=0)
-                    # q_sty = torch.cat([sty_q_injected]*b, dim=0)
-                    # v_cnt = torch.cat([cnt_v_injected]*b, dim=0)
-
                     k_sty_2 = torch.cat([sty2_k_injected]*b, dim=0)
                     v_sty_2 = torch.cat([sty2_v_injected]*b, dim=0)
                     
@@ -448,10 +341,10 @@ class CrossAttention(nn.Module):
                     
                     sim_1 = self.get_batch_sim_with_mask(
                         cc_sim=cc_sim,
-                        q=self.q, ##  self.q 면 q_cs를 의미, q_cnt면 감마가 적용되지않은 cnt그대로
-                        delta_q=self.q, # Qcs
-                        delta_k=self.k, # self.k = k_sty와 같음. inject당시 sty에서 key와 value를 가져오기 때문.
-                        k=self.k,
+                        q=q, ##  self.q 면 q_cs를 의미, q_cnt면 감마가 적용되지않은 cnt그대로
+                        delta_q=q, # Qcs
+                        delta_k=k, # self.k = k_sty와 같음. inject당시 sty에서 key와 value를 가져오기 때문.
+                        k=k,
                         num_heads=h,
                         sty_name=self.sty_name,
                         cnt_name=self.cnt_name,
@@ -465,8 +358,8 @@ class CrossAttention(nn.Module):
                     # Back
                     sim_2 = self.get_batch_sim_with_mask(
                         cc_sim=cc_sim,
-                        q=self.q, ##  self.q 면 q_cs를 의미, q_cnt면 감마가 적용되지않은 cnt그대로
-                        delta_q=self.q, # Qcs,
+                        q=q, ##  self.q 면 q_cs를 의미, q_cnt면 감마가 적용되지않은 cnt그대로
+                        delta_q=q, # Qcs,
                         delta_k=k_sty_2, # stlye_2 key
                         k=k_sty_2,
                         num_heads=h,
@@ -476,64 +369,6 @@ class CrossAttention(nn.Module):
                         attn_matrix_scale=attn_matrix_scale,
                         ch = 1.0,
                     )# Qcs Ks2 + a2
-
-                    # h, BN, _ = sim.shape
-                    # B = b
-                    # N = BN // B
-                    # # 1) (h, B*N, B*N) -> (h, B, N, B, N)
-                    # sim = sim.view(h, B, N, B, N)
-                    # # 2) (h, B, N, B, N) -> (B, h, N, B, N)
-                    # sim = sim.permute(1, 0, 2, 3, 4)
-                    # sim = sim.reshape(B*h, N, N)
-                    
-                    # attn = sim.softmax(dim=-1)
-                
-                    # self.attn = attn
-                    # out = einsum('b i j, b j d -> b i d', attn, v)
-                    
-                    
-                    # cc_sim  = cc_sim.view(h, B, N, B, N)
-                    # cc_sim = cc_sim.permute(1, 0, 2, 3, 4)
-                    # cc_sim = cc_sim.reshape(B*h, N, N)
-                    
-                
-                    
-                    
-                    
-                    # # 오메가 마스크 적용 ###################
-                    # if mask_path is not None and self.sty_name == "c_style.jpg":
-                    #     mask = torch.tensor(np.load(mask_path), dtype=torch.float32).cuda()
-                        
-                    # # # 수정본, 배경에 마스크 적용
-                    # elif mask_path is not None and self.sty_name == "b_style.jpg":
-                    #     mask = torch.tensor(np.load(mask_path), dtype=torch.float32).cuda()
-                    #     mask = 1.0 - mask   # 배경용 반전
-                        
-                    # else:
-                    #     print("ERROR: mask npy not found!!!")
-                    #     mask = torch.tensor([[1., 1., 1., 1.],
-                    #                         [1., -1., -1., 1.],
-                    #                         [1., -1., -1., 1.],
-                    #                         [-1., -1., -1., -1.]], dtype=torch.float32).cuda()
-                    
-                    # mask = mask.unsqueeze(0).unsqueeze(0)
-                    # H, N, D = out.shape 
-                    # mask = F.interpolate(mask, size=(int(math.sqrt(out.shape[1])),
-                    #                      int(math.sqrt(out.shape[1]))),
-                    #          mode='bilinear', align_corners=False)
-                    
-                    # mask = mask.view(1, N, 1)              # (1, N, 1)
-                    # mask = mask.expand(H, -1, -1)          # (H, N, 1)
-
-                    # # style/content blend (head별 동일 mask 적용)
-                    # attn_cnt = cc_sim.softmax(dim=-1)
-                    # out_cnt = einsum('b i j, b j d -> b i d', attn_cnt, v_cnt)
-                    # # out = mask * out + (1-mask) * out_cnt
-                    # # cat 아닐 때,
-                    # out = rearrange(out, '(b h) n d -> b n (h d)', h=h)
-                    # # 오메가 마스크 적용 ###################
-                    
-                    
 
                     cat_sim = torch.cat((sim_1, sim_2, cc_sim), 2)
                     # batch 차원 맞추기
@@ -545,22 +380,13 @@ class CrossAttention(nn.Module):
                     # cat시에는
                     out = rearrange(cat_out, 'h (b n) d -> b n (h d)', h=h, b=b)
 
-
-                    
-                    
-
-                    
-                    
-                    
                 # style injection이 일어나지 않는 경우 -- 원본과 동일하게 진행
                 else:
                     sim = einsum('b i d, b j d -> b i j', q, k)
                     sim *= attn_matrix_scale
                     sim *= self.scale
                     attn = sim.softmax(dim=-1)
-                    self.attn = attn
-                    
-                    
+
                     out = einsum('b i j, b j d -> b i d', attn, v)
                 
                     out = rearrange(out, '(b h) n d -> b n (h d)', h=h)
@@ -573,7 +399,6 @@ class CrossAttention(nn.Module):
                     sim *= attn_matrix_scale    
                 sim *= self.scale
                 attn = sim.softmax(dim=-1)
-                self.attn = attn
 
                 out = einsum('b i j, b j d -> b i d', attn, v)
                 out = rearrange(out, '(b h) n d -> b n (h d)', h=h)
@@ -587,7 +412,6 @@ class CrossAttention(nn.Module):
             
             
             sim *= self.scale
-            self.qk_sim = sim
 
             if exists(mask):
                 mask = rearrange(mask, 'b ... -> b (...)')
@@ -597,7 +421,6 @@ class CrossAttention(nn.Module):
 
             # attention, what we cannot get enough of
             attn = sim.softmax(dim=-1)
-            self.attn = attn
 
             out = einsum('b i j, b j d -> b i d', attn, v)
             out = rearrange(out, '(b h) n d -> b n (h d)', h=h)

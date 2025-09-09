@@ -58,7 +58,7 @@ class TripleImageDataset:
         # numpy → torch 변환
         image = np.array(image).astype(np.float32) / 255.0
         image = image[None].transpose(0, 3, 1, 2)  # (1, C, H, W)
-        image = torch.from_numpy(image).to(self.device)
+        image = torch.from_numpy(image)
 
         return 2. * image - 1.  # [-1, 1] 범위로 정규화
 

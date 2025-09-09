@@ -126,9 +126,9 @@ def main():
             if len(block) > 1 and "SpatialTransformer" in str(type(block[1])):
                 if block_idx in self_attn_output_block_indices:
                     # self-attn
-                    q = block[1].transformer_blocks[0].attn1.q
-                    k = block[1].transformer_blocks[0].attn1.k
-                    v = block[1].transformer_blocks[0].attn1.v
+                    q = block[1].transformer_blocks[0].attn1.q.detach().cpu()
+                    k = block[1].transformer_blocks[0].attn1.k.detach().cpu()
+                    v = block[1].transformer_blocks[0].attn1.v.detach().cpu()
                     save_feature_map(q, f"{feature_type}_{block_idx}_self_attn_q", i)
                     save_feature_map(k, f"{feature_type}_{block_idx}_self_attn_k", i)
                     save_feature_map(v, f"{feature_type}_{block_idx}_self_attn_v", i)
@@ -140,7 +140,7 @@ def main():
     def save_feature_map_z(xt, name, time):
         global feat_maps
         cur_idx = idx_time_dict[time]
-        feat_maps[cur_idx][name] = xt
+        feat_maps[cur_idx][name] = xt.detach().cpu()
 
     def residual_injection_callback(pred_x0, xt, t):
         # feature map 저장
@@ -191,7 +191,9 @@ def main():
 
     for idx in range(len(dataset)):
         cnt_img, char_img, back_img, cnt_path, char_path, back_path = dataset[idx]
-
+        cnt_img  = cnt_img.to(device, non_blocking=True)
+        char_img = char_img.to(device, non_blocking=True)
+        back_img = back_img.to(device, non_blocking=True)
         # ===== CONTENT FEATURE =====
         cnt_feat_name = os.path.join(
             feat_path_root, os.path.splitext(os.path.basename(cnt_path))[0] + '_cnt.pkl'

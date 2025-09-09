@@ -8,6 +8,7 @@ from pytorch_lightning import seed_everything
 from torch import autocast
 from contextlib import nullcontext
 import copy
+import gc  # 가비지 컬렉션 추가
 
 from ldm.util import instantiate_from_config
 from ldm.models.diffusion.ddim import DDIMSampler
@@ -21,66 +22,70 @@ from ldm.modules.attention import CrossAttention
 from high_frequency_final import patch_decoder_resblocks_h_and_cnt_hf, make_content_injection_schedule
 
 from dataset import TripleImageDataset
+from torch.utils.data import DataLoader
 
-# 전역 변수 제거 - 함수 내부에서 관리하도록 변경
-feat_maps = []
+import traceback
+def print_gpu_memory(step_name):
+    """GPU 메모리 사용량 출력"""
+    print(f"\n[{step_name}]")
+    print(f"  Allocated: {torch.cuda.memory_allocated()/1024**3:.3f} GB")
+    print(f"  Reserved: {torch.cuda.memory_reserved()/1024**3:.3f} GB")
+    print(f"  Free: {(torch.cuda.get_device_properties(0).total_memory - torch.cuda.memory_allocated())/1024**3:.3f} GB")
+
+def check_tensor_sizes(name, obj):
+    """큰 텐서들 찾기"""
+    if torch.is_tensor(obj):
+        size_gb = obj.element_size() * obj.nelement() / 1024**3
+        if size_gb > 0.1:  # 0.1GB 이상만
+            print(f"  {name}: {obj.shape}, {size_gb:.3f} GB, device: {obj.device}")
+
+
+
+
 
 def save_img_from_sample(model, samples_ddim, fname):
-    x_samples_ddim = model.decode_first_stage(samples_ddim)
-    x_samples_ddim = torch.clamp((x_samples_ddim + 1.0) / 2.0, min=0.0, max=1.0)
-    x_samples_ddim = x_samples_ddim.cpu().permute(0, 2, 3, 1).numpy()
-    x_image_torch = torch.from_numpy(x_samples_ddim).permute(0, 3, 1, 2)
-    x_sample = 255. * rearrange(x_image_torch[0].cpu().numpy(), 'c h w -> h w c')
-    img = Image.fromarray(x_sample.astype(np.uint8))
-    img.save(fname)
+    with torch.no_grad():  # gradient 계산 방지
+        x_samples_ddim = model.decode_first_stage(samples_ddim)
+        x_samples_ddim = torch.clamp((x_samples_ddim + 1.0) / 2.0, min=0.0, max=1.0)
+        x_samples_ddim = x_samples_ddim.cpu().permute(0, 2, 3, 1).numpy()
+        x_image_torch = torch.from_numpy(x_samples_ddim).permute(0, 3, 1, 2)
+        x_sample = 255. * rearrange(x_image_torch[0].cpu().numpy(), 'c h w -> h w c')
+        img = Image.fromarray(x_sample.astype(np.uint8))
+        img.save(fname)
 
-def feat_merge_2sty(opt, cnt_feats, sty_feats_1, sty_feats_2, start_step=0):
-    feat_maps = [{
-        'config': {  
-            'gamma': opt.gamma,
-            'T': opt.T,
-            'timestep': i,
-            'cnt_k': None,
-            'sty_q': None,
-        }
-    } for i in range(50)]
+def feat_merge_2sty(opt, feat_maps, cnt_feats, sty_feats_1, sty_feats_2, start_step=0):
 
     for i in range(len(feat_maps)):
-        # if i < (50 - start_step): ## 왜 time step 981을 건너뛰는지 
-        #     continue
-
         cnt_feat = cnt_feats[i]
         sty_feat_1 = sty_feats_1[i]
         sty_feat_2 = sty_feats_2[i]
         ori_keys = cnt_feat.keys()
 
         for ori_key in ori_keys:
-            # 기본: content q, style1 k/v
+            # .detach()를 추가하여 gradient 연결 끊기
             if ori_key.endswith('q'):
-                feat_maps[i][ori_key] = cnt_feat[ori_key]
+                feat_maps[i][ori_key] = cnt_feat[ori_key].detach() if torch.is_tensor(cnt_feat[ori_key]) else cnt_feat[ori_key]
             if ori_key.endswith('k') or ori_key.endswith('v'):
-                feat_maps[i][ori_key] = sty_feat_1[ori_key]
+                feat_maps[i][ori_key] = sty_feat_1[ori_key].detach() if torch.is_tensor(sty_feat_1[ori_key]) else sty_feat_1[ori_key]
 
-            # content 복사
             if ori_key.endswith('k') or ori_key.endswith('v'):
-                feat_maps[i][ori_key + '_cnt'] = cnt_feat[ori_key]
+                feat_maps[i][ori_key + '_cnt'] = cnt_feat[ori_key].detach() if torch.is_tensor(cnt_feat[ori_key]) else cnt_feat[ori_key]
 
-            # style1 복사
             if ori_key.endswith('q'):
-                feat_maps[i][ori_key + '_sty1'] = sty_feat_1[ori_key]
+                feat_maps[i][ori_key + '_sty1'] = sty_feat_1[ori_key].detach() if torch.is_tensor(sty_feat_1[ori_key]) else sty_feat_1[ori_key]
 
-            # style2 복사
             if ori_key.endswith('q') or ori_key.endswith('k') or ori_key.endswith('v'):
-                feat_maps[i][ori_key + '_sty2'] = sty_feat_2[ori_key]
+                feat_maps[i][ori_key + '_sty2'] = sty_feat_2[ori_key].detach() if torch.is_tensor(sty_feat_2[ori_key]) else sty_feat_2[ori_key]
 
     return feat_maps
 
 def adain(cnt_feat, sty_feat):
-    cnt_mean = cnt_feat.mean(dim=[0, 2, 3],keepdim=True)
-    cnt_std = cnt_feat.std(dim=[0, 2, 3],keepdim=True)
-    sty_mean = sty_feat.mean(dim=[0, 2, 3],keepdim=True)
-    sty_std = sty_feat.std(dim=[0, 2, 3],keepdim=True)
-    return ((cnt_feat-cnt_mean)/cnt_std)*sty_std + sty_mean
+    with torch.no_grad():  # gradient 계산 방지
+        cnt_mean = cnt_feat.mean(dim=[0, 2, 3],keepdim=True)
+        cnt_std = cnt_feat.std(dim=[0, 2, 3],keepdim=True)
+        sty_mean = sty_feat.mean(dim=[0, 2, 3],keepdim=True)
+        sty_std = sty_feat.std(dim=[0, 2, 3],keepdim=True)
+        return ((cnt_feat-cnt_mean)/cnt_std)*sty_std + sty_mean
 
 def load_model_from_config(config, ckpt, verbose=False):
     print(f"Loading model from {ckpt}")
@@ -93,6 +98,30 @@ def load_model_from_config(config, ckpt, verbose=False):
     model.cuda().eval()
     return model
 
+def clear_attention_cache(model):
+    """CrossAttention 모듈의 모든 캐시와 임시 속성 정리"""
+    for m in model.modules():
+        if isinstance(m, CrossAttention):
+            # mask_cache 정리 (가장 중요!)
+            if hasattr(m, "mask_cache"):
+                m.mask_cache.clear()
+            if hasattr(m, 'cnt_name'):
+                delattr(m, 'cnt_name')
+            if hasattr(m, '_saved_tensors'):
+                del m._saved_tensors
+            # 텐서 캐시들 정리
+            if hasattr(m, "some_cache_tensor"):
+                m.some_cache_tensor = None
+def move_feat_maps_to_device(feat_maps, device):
+    for i, f in enumerate(feat_maps):
+        if isinstance(f, dict):
+            for k, v in f.items():
+                if torch.is_tensor(v):
+                    f[k] = v.to(device)
+        elif torch.is_tensor(f):
+            feat_maps[i] = f.to(device)
+    return feat_maps
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--ddim_inv_steps', type=int, default=50)
@@ -104,7 +133,7 @@ def main():
     parser.add_argument('--C', type=int, default=4)
     parser.add_argument('--f', type=int, default=8)
     parser.add_argument('--T', type=float, default=1.5)
-    parser.add_argument('--gamma', type=float, default=0.75)
+    parser.add_argument('--gamma', type=float, default=0.5)
     parser.add_argument("--attn_layer", type=str, default='6,7,8,9,10,11')
     parser.add_argument('--model_config', type=str, default='models/ldm/stable-diffusion-v1/v1-inference.yaml')
     parser.add_argument('--precomputed', type=str, default='./precomputed_feats_k')
@@ -122,14 +151,13 @@ def main():
     os.makedirs(opt.output_path, exist_ok=True)
     if len(opt.precomputed) > 0:
         os.makedirs(opt.precomputed, exist_ok=True)
-    
+
     model_config = OmegaConf.load(f"{opt.model_config}")
     model = load_model_from_config(model_config, f"{opt.ckpt}")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = model.to(device)
+    model = model.to(device) # 3.988GB
     sampler = DDIMSampler(model)
     sampler.make_schedule(ddim_num_steps=opt.save_feat_steps, ddim_eta=opt.ddim_eta, verbose=False)
-    
     print("DDIM timesteps:", sampler.ddim_timesteps) 
     time_range = np.flip(sampler.ddim_timesteps)
     idx_time_dict = {t:i for i,t in enumerate(time_range)}
@@ -138,27 +166,29 @@ def main():
     uc = model.get_learned_conditioning([""])
     shape = [opt.C, opt.H // opt.f, opt.W // opt.f]
     
-    dataset = TripleImageDataset(opt.data_root, "dataset.txt", image_size=512, device=device)
+    dataset = TripleImageDataset(opt.data_root, "dataset.txt", image_size=opt.H, device=device)
+
+    # DataLoader 생성 (inference용: shuffle=False, batch_size=1)
+    dataloader = DataLoader(
+        dataset,
+        batch_size=1,
+        shuffle=False,
+        num_workers=4,       # CPU 코어 개수에 맞춰 조절 가능
+        pin_memory=True
+    )
+
     unet_model = model.model.diffusion_model
     begin = time.time()
     
-    ## residual injection
-    # 매 DDIM 스텝마다 timestep을 hook 모듈에 설정하는 콜백
     def residual_injection_callback(step_idx):
         t = sampler.ddim_timesteps[step_idx]
-        # residual_high 저장 경로에서 불러오기
-        # 예: precomputed_feats/.../{image_name}_residuals_all.pkl
-        # 현재 content 이미지의 high-freq residual 불러오기
-
         for block_id in range(6, 12):
             if block_id >= len(unet_model.output_blocks):
                 break
-
             for module in reversed(unet_model.output_blocks[block_id]):
                 if module.__class__.__name__.endswith("ResBlock"):
                     module.ri_timestep = int(t)
                     break
-                # EMA 모델도 동일하게
 
         if hasattr(model, "model_ema"):
             ema_unet = model.model_ema.diffusion_model
@@ -169,166 +199,134 @@ def main():
                     if module.__class__.__name__.endswith("ResBlock"):
                         module.ri_timestep = int(t)
                         break
-    
-    for idx in range(len(dataset)):
-        print(f"Processing image {idx+1}/{len(dataset)}")
+
+    # 기존 for idx in range(len(dataset)) 부분 대체
+    for batch_idx, batch in enumerate(dataloader):
+        print(f"Processing image {batch_idx+1}/{len(dataset)}")
+
+        cnt_img, char_img, back_img, cnt_path, char_path, back_path = batch
+        # 경로는 batch_size=1일 때 list/tuple 형태 -> string으로 꺼내기
+        if isinstance(cnt_path, (list, tuple)): cnt_path = cnt_path[0]
+        if isinstance(char_path, (list, tuple)): char_path = char_path[0]
+        if isinstance(back_path, (list, tuple)): back_path = back_path[0]
+
+        # --- Move to GPU only here ---
+        # Dataset에서 CPU 텐서로만 반환되어야 함 (shape: (B,C,H,W))
+        cnt_img  = cnt_img.to(device, non_blocking=True)
+        char_img = char_img.to(device, non_blocking=True)
+        back_img = back_img.to(device, non_blocking=True)
         
-        # 각 반복마다 feat_maps 초기화
-        feat_maps_current = [{'config': {'gamma':opt.gamma,'T':opt.T,'cnt_k': None}} for _ in range(50)]
+        # no_grad 컨텍스트로 전체 처리 감싸기
+        with torch.no_grad():
+            feat_maps_local = [{
+                'config': {  
+                    'gamma': opt.gamma,
+                    'T': opt.T,
+                    'timestep': i,
+                    'cnt_k': None,
+                    'sty_q': None,
+                }
+            } for i in range(50)]
+            #move_feat_maps_to_device(feat_maps_local, device)
+            # 3.998 GB -> 13.895GB -> 17.51GB
 
-        def save_feature_map(fmap, fname, t):
-            cur_idx = idx_time_dict[t]
-            feat_maps_current[cur_idx][fname] = fmap
+            ## 마스크 적용
+            for m in unet_model.modules():
+                if isinstance(m, CrossAttention):
+                    m.cnt_name = cnt_path
 
-        def ddim_sampler_callback(pred_x0, xt, i):
-            save_feature_map(xt, 'z_enc', i)
+            cnt_base = os.path.splitext(os.path.basename(cnt_path))[0]
+            char_base = os.path.splitext(os.path.basename(char_path))[0]
+            back_base = os.path.splitext(os.path.basename(back_path))[0]
 
-        cnt_img, char_img, back_img, cnt_path, char_path, back_path = dataset[idx]
+            # 변수 초기화
+            char_z_enc, back_z_enc, cnt_z_enc = None, None, None
+            char_feat, back_feat, cnt_feat = None, None, None
 
-        ## 마스크 적용
-        for m in unet_model.modules():
-            if isinstance(m, CrossAttention):
-                m.cnt_name = cnt_path
+            # Style1 (char)
+            char_feat_name = os.path.join(opt.precomputed, f"{char_base}_sty.pkl")
+            if os.path.isfile(char_feat_name):
+                with open(char_feat_name, 'rb') as h:
+                    char_feat = pickle.load(h)
+                    char_z_enc = torch.clone(char_feat[0]['z_enc']).detach()
+            #move_feat_maps_to_device(char_feat, device)
+            #char_z_enc = char_z_enc.to(device)
 
-        cnt_base = os.path.splitext(os.path.basename(cnt_path))[0]
-        char_base = os.path.splitext(os.path.basename(char_path))[0]
-        back_base = os.path.splitext(os.path.basename(back_path))[0]
+            # Style2 (back)
+            back_feat_name = os.path.join(opt.precomputed, f"{back_base}_sty.pkl")
+            if os.path.isfile(back_feat_name):
+                with open(back_feat_name, 'rb') as h:
+                    back_feat = pickle.load(h)
+                    back_z_enc = torch.clone(back_feat[0]['z_enc']).detach()
+            #move_feat_maps_to_device(back_feat, device)
+            #back_z_enc = back_z_enc.to(device)
 
-        # 변수 초기화
-        char_z_enc, back_z_enc, cnt_z_enc = None, None, None
-        char_feat, back_feat, cnt_feat = None, None, None
+            # Content (cnt)
+            cnt_feat_name = os.path.join(opt.precomputed, f"{cnt_base}_cnt.pkl")
+            if os.path.isfile(cnt_feat_name):
+                with open(cnt_feat_name, 'rb') as h:
+                    cnt_feat = pickle.load(h)
+                    cnt_z_enc = torch.clone(cnt_feat[0]['z_enc']).detach()
+            #move_feat_maps_to_device(cnt_feat, device)
+            #cnt_z_enc = cnt_z_enc.to(device)
 
-        # Style1 (char)
-        char_feat_name = os.path.join(opt.precomputed, f"{char_base}_sty.pkl")
-        if os.path.isfile(char_feat_name):
-            with open(char_feat_name, 'rb') as h:
-                char_feat = pickle.load(h)
-                char_z_enc = torch.clone(char_feat[0]['z_enc'])
-        else:
-            init_char = model.get_first_stage_encoding(model.encode_first_stage(char_img))
-            char_z_enc, _ = sampler.encode_ddim(
-                init_char.clone(), num_steps=opt.ddim_inv_steps, unconditional_conditioning=uc,
-                end_step=time_idx_dict[opt.ddim_inv_steps-1-opt.start_step],
-                callback_ddim_timesteps=opt.save_feat_steps,
-                img_callback=ddim_sampler_callback
+            # High-frequency enhancement
+            schedule = make_content_injection_schedule(sampler.ddim_timesteps, alpha=0.4)
+            patch_decoder_resblocks_h_and_cnt_hf(unet_model, schedule, cnt_feat, ratio=opt.ratio)
+            if hasattr(model, "model_ema"):
+                patch_decoder_resblocks_h_and_cnt_hf(model.model_ema.diffusion_model, 
+                                                        schedule, cnt_feat, ratio=opt.ratio)
+
+            # AdaIN blending
+            if opt.without_init_adain:
+                adain_z_enc = cnt_z_enc.detach()
+            else:
+                mask = torch.tensor(np.load(os.path.join(opt.data_root, "cnt", f"{cnt_base}_mask.npy")), 
+                                   dtype=torch.float32).to(device)
+                mask = mask.unsqueeze(0).unsqueeze(0)
+                mask = F.interpolate(mask, size=(cnt_z_enc.shape[2], cnt_z_enc.shape[3]), 
+                                    mode="bilinear", align_corners=False)
+                mask = mask.expand(-1, cnt_z_enc.shape[1], -1, -1)
+                adain_z_enc = (mask * adain(cnt_z_enc.to(device), char_z_enc.to(device)) + 
+                              (1-mask) * adain(cnt_z_enc.to(device), back_z_enc.to(device))).detach()
+                del mask
+            del char_z_enc, back_z_enc, cnt_z_enc
+            # Feature merge
+            merged_feat_maps = feat_merge_2sty(opt, copy.deepcopy(feat_maps_local), cnt_feat, char_feat, back_feat, start_step=opt.start_step)
+            merged_feat_maps = move_feat_maps_to_device(merged_feat_maps, device)
+            del char_feat, back_feat, cnt_feat
+            # Inference
+            
+            samples_ddim, _ = sampler.sample(
+                S=opt.save_feat_steps,
+                batch_size=1,
+                shape=shape,
+                verbose=False,
+                unconditional_conditioning=uc,
+                eta=opt.ddim_eta,
+                x_T=adain_z_enc,
+                injected_features=merged_feat_maps,
+                start_step=opt.start_step,
+                callback=residual_injection_callback,
             )
-            char_feat = copy.deepcopy(feat_maps_current)
-            char_z_enc = feat_maps_current[0]['z_enc']
-            with open(char_feat_name, 'wb') as h:
-                pickle.dump(char_feat, h)
-            # 중간 변수 정리
-            del init_char
 
-        # Style2 (back)
-        back_feat_name = os.path.join(opt.precomputed, f"{back_base}_sty.pkl")
-        if os.path.isfile(back_feat_name):
-            with open(back_feat_name, 'rb') as h:
-                back_feat = pickle.load(h)
-                back_z_enc = torch.clone(back_feat[0]['z_enc'])
-        else:
-            # feat_maps_current 재초기화
-            feat_maps_current = [{'config': {'gamma':opt.gamma,'T':opt.T,'cnt_k': None}} for _ in range(50)]
-            init_back = model.get_first_stage_encoding(model.encode_first_stage(back_img))
-            back_z_enc, _ = sampler.encode_ddim(
-                init_back.clone(), num_steps=opt.ddim_inv_steps, unconditional_conditioning=uc,
-                end_step=time_idx_dict[opt.ddim_inv_steps-1-opt.start_step],
-                callback_ddim_timesteps=opt.save_feat_steps,
-                img_callback=ddim_sampler_callback
-            )
-            back_feat = copy.deepcopy(feat_maps_current)
-            back_z_enc = feat_maps_current[0]['z_enc']
-            with open(back_feat_name, 'wb') as h:
-                pickle.dump(back_feat, h)
-            # 중간 변수 정리
-            del init_back
-
-        # Content (cnt)
-        cnt_feat_name = os.path.join(opt.precomputed, f"{cnt_base}_cnt.pkl")
-
-        if os.path.isfile(cnt_feat_name):
-            with open(cnt_feat_name, 'rb') as h:
-                cnt_feat = pickle.load(h)
-                cnt_z_enc = torch.clone(cnt_feat[0]['z_enc'])
-        else:
-            # feat_maps_current 재초기화
-            feat_maps_current = [{'config': {'gamma':opt.gamma,'T':opt.T,'cnt_k': None}} for _ in range(50)]
-            init_cnt = model.get_first_stage_encoding(model.encode_first_stage(cnt_img))
-            cnt_z_enc, _ = sampler.encode_ddim(
-                init_cnt.clone(), num_steps=opt.ddim_inv_steps, unconditional_conditioning=uc,
-                end_step=time_idx_dict[opt.ddim_inv_steps-1-opt.start_step],
-                callback_ddim_timesteps=opt.save_feat_steps,
-                img_callback=ddim_sampler_callback
-            )
-            cnt_feat = copy.deepcopy(feat_maps_current)
-            cnt_z_enc = feat_maps_current[0]['z_enc']
-            with open(cnt_feat_name, 'wb') as h:
-                pickle.dump(cnt_feat, h)
-            # 중간 변수 정리
-            del init_cnt
-
-        # High-frequency enhancement
-        schedule = make_content_injection_schedule(sampler.ddim_timesteps, alpha=0.4)
-        patch_decoder_resblocks_h_and_cnt_hf(unet_model, 
-                                                schedule, 
-                                                cnt_feat, ratio=opt.ratio)
-        if hasattr(model, "model_ema"):
-            patch_decoder_resblocks_h_and_cnt_hf(model.model_ema.diffusion_model, 
-                                                    schedule, 
-                                                    cnt_feat, ratio=opt.ratio)
-        # AdaIN blending
-        if opt.without_init_adain:
-            adain_z_enc = cnt_z_enc
-        else:
-            mask = torch.tensor(np.load(os.path.join(opt.data_root, "cnt", f"{cnt_base}_mask.npy")), dtype=torch.float32).to(device)
-            mask = mask.unsqueeze(0).unsqueeze(0)
-            mask = F.interpolate(mask, size=(cnt_z_enc.shape[2], cnt_z_enc.shape[3]), mode="bilinear", align_corners=False)
-            mask = mask.expand(-1, cnt_z_enc.shape[1], -1, -1)
-            adain_z_enc = mask * adain(cnt_z_enc, char_z_enc) + (1-mask) * adain(cnt_z_enc, back_z_enc)
-            # mask 정리
-            del mask
-
-        # Feature merge
-        merged_feat_maps = feat_merge_2sty(opt, cnt_feat, char_feat, back_feat, start_step=opt.start_step)
-
-        # Inference
-        samples_ddim, _ = sampler.sample(
-            S=opt.save_feat_steps, 
-            batch_size=1, 
-            shape=shape, 
-            verbose=False,
-            unconditional_conditioning=uc, 
-            eta=opt.ddim_eta, 
-            x_T=adain_z_enc,
-            injected_features=merged_feat_maps, 
-            start_step=opt.start_step,
-            # ## 마스크 적용
-            # # ## residual injection
-            callback=residual_injection_callback,
-        )
-
-        # 저장 파일명 = cnt_char_back.png
-        result_name = f"{cnt_base}_{char_base}_{back_base}.png"
-        save_img_from_sample(model, samples_ddim, os.path.join(opt.output_path, result_name))
-
+            # 저장 파일명
+            result_name = f"{cnt_base}_{char_base}_{back_base}.png"
+            save_img_from_sample(model, samples_ddim, os.path.join(opt.output_path, result_name))
         # 명시적 메모리 정리
-        del samples_ddim
-        if char_z_enc is not None:
-            del char_z_enc
-        if back_z_enc is not None:
-            del back_z_enc
-        if cnt_z_enc is not None:
-            del cnt_z_enc
-        if adain_z_enc is not None:
-            del adain_z_enc
-        del char_feat, back_feat, cnt_feat
+        del samples_ddim, adain_z_enc
         del merged_feat_maps
-        del feat_maps_current
 
+        # CrossAttention 캐시 클리어
+        clear_attention_cache(unet_model)
+        if hasattr(model, "model_ema"):
+            clear_attention_cache(model.model_ema.diffusion_model)
+        
+        # Python 가비지 컬렉션 강제 실행
+        gc.collect()
+        
         # GPU 캐시 정리
         torch.cuda.empty_cache()
-        
-        print(f"Completed image {idx+1}/{len(dataset)}")
-            
 
     print(f"Total end: {time.time() - begin}")
 
