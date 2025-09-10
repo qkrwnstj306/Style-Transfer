@@ -7,6 +7,7 @@
 ## Create a Conda Environment
 
 ```
+pip install --upgrade pip
 conda env create -f environment.yaml
 conda activate StyleID
 ```
